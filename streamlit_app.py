@@ -23,26 +23,24 @@ sector = st.number_input(
 # ------------------------------------------------------------
 # LOAD TESS LIGHT CURVE
 # ------------------------------------------------------------
-@st.cache_data(show_spinner=True)
-def load_tess_dataframe(target, sector):
-    if sector == 0:
-        search = lk.search_lightcurve(target, mission="TESS")
-    else:
-        search = lk.search_lightcurve(target, mission="TESS", sector=sector)
+with st.spinner("Loading TESS light curve..."):
+    search = lk.search_lightcurve(target, mission="TESS")
 
-    lc = search.download().remove_nans()
+    if len(search) == 0:
+        st.error("No TESS products found for this target.")
+        st.stop()
 
-    df = pd.DataFrame({
-        "time": lc.time.value,
-        "flux": lc.flux.value
-    })
-    return df
+    lc = search.download()
 
-try:
-    df = load_tess_dataframe(target, sector)
-except Exception as e:
-    st.error(f"Failed to load TESS data: {e}")
-    st.stop()
+    if lc is None:
+        st.error(
+            "TESS search returned results, but no downloadable light curve "
+            "is available for this target.\n\n"
+            "Try a different target or cadence."
+        )
+        st.stop()
+
+    lc = lc.remove_nans()
 
 # ------------------------------------------------------------
 # PREPROCESS
