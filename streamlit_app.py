@@ -20,9 +20,12 @@ sector = st.number_input(
     value=0,
     step=1
 )
-# ------------------------------------------------------------
-# LOAD TESS LIGHT CURVE
-# ------------------------------------------------------------
+# ============================================================
+# LOAD TESS LIGHT CURVE (ROBUST)
+# ============================================================
+
+df = None
+
 with st.spinner("Loading TESS light curve..."):
     search = lk.search_lightcurve(target, mission="TESS")
 
@@ -36,12 +39,24 @@ with st.spinner("Loading TESS light curve..."):
         st.error(
             "TESS search returned results, but no downloadable light curve "
             "is available for this target.\n\n"
-            "Try a different target or cadence."
+            "Try a different target."
         )
         st.stop()
 
     lc = lc.remove_nans()
 
+    df = pd.DataFrame({
+        "time": lc.time.value,
+        "flux": lc.flux.value
+    })
+
+# ============================================================
+# SAFETY CHECK (MANDATORY)
+# ============================================================
+
+if df is None or df.empty:
+    st.error("Light curve failed to load correctly.")
+    st.stop()
 # ------------------------------------------------------------
 # PREPROCESS
 # ------------------------------------------------------------
