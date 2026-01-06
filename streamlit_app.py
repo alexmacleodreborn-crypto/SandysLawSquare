@@ -9,6 +9,11 @@ st.set_page_config(page_title="Sandy’s Law — Square (TESS)", layout="wide")
 st.title("Sandy’s Law — Square Phase Space (TESS)")
 st.caption("Real light curves → Toy 3 (Corner Dwell → Quench)")
 
+# ============================================================
+# PREPROCESSING OPTIONS
+# ============================================================
+
+normalize = st.checkbox("Normalize Flux", value=True)
 # ------------------------------------------------------------
 # PARAMETERS
 # ------------------------------------------------------------
