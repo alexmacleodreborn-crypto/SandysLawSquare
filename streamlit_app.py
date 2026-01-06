@@ -13,11 +13,13 @@ st.caption("Real light curves → Toy 3 (Corner Dwell → Quench)")
 # PARAMETERS
 # ------------------------------------------------------------
 target = st.text_input("TESS Target (TIC / KIC / Name)", "TIC 307210830")
-sector = st.number_input("TESS Sector (0 = auto)", 0, 0, 100)
-
-normalize = st.checkbox("Normalize Flux", True)
-smooth = st.slider("Smoothing window", 1, 101, 15, step=2)
-
+sector = st.number_input(
+    "TESS Sector (0 = auto)",
+    min_value=0,
+    max_value=100,
+    value=0,
+    step=1
+)
 # ------------------------------------------------------------
 # LOAD TESS LIGHT CURVE
 # ------------------------------------------------------------
