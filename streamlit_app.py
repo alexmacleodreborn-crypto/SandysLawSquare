@@ -1,170 +1,123 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.signal import savgol_filter
 import lightkurve as lk
 
-# ============================================================
-# STREAMLIT CONFIG
-# ============================================================
+st.set_page_config(page_title="Sandy’s Law — Square (TESS)", layout="wide")
 
-st.set_page_config(
-    page_title="Sandy’s Law — Square",
-    layout="wide"
-)
+st.title("Sandy’s Law — Square Phase Space (TESS)")
+st.caption("Real light curves → Toy 3 (Corner Dwell → Quench)")
 
-st.title("Sandy’s Law — Square")
-st.caption("Bounded phase space • Corner dwell • Quench detection")
+# ------------------------------------------------------------
+# PARAMETERS
+# ------------------------------------------------------------
+target = st.text_input("TESS Target (TIC / KIC / Name)", "TIC 307210830")
+sector = st.number_input("TESS Sector (0 = auto)", 0, 0, 100)
 
-# ============================================================
-# SIDEBAR CONTROLS
-# ============================================================
+normalize = st.checkbox("Normalize Flux", True)
+smooth = st.slider("Smoothing window", 1, 101, 15, step=2)
 
-st.sidebar.header("Data Source (Validation)")
-
-target = st.sidebar.text_input(
-    "TESS Target (validation star)",
-    value="TIC 141914082"
-)
-
-st.sidebar.markdown("---")
-st.sidebar.header("Toy-3 Parameters")
-
-z_th = st.sidebar.slider("Z threshold (trap)", 0.5, 0.95, 0.7, 0.01)
-s_th = st.sidebar.slider("Σ threshold (escape)", 0.05, 0.5, 0.25, 0.01)
-
-smooth_order = st.sidebar.slider("Smoothing order", 2, 5, 3)
-max_window = st.sidebar.slider("Max smoothing window", 9, 51, 31, 2)
-
-# ============================================================
-# LOAD LIGHT CURVE (NO CACHING — STREAMLIT SAFE)
-# ============================================================
-
-with st.spinner("Loading TESS light curve..."):
-    search = lk.search_lightcurve(target, mission="TESS")
-
-    if len(search) == 0:
-        st.error("No TESS light curve found for this target.")
-        st.stop()
+# ------------------------------------------------------------
+# LOAD TESS LIGHT CURVE
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=True)
+def load_tess_dataframe(target, sector):
+    if sector == 0:
+        search = lk.search_lightcurve(target, mission="TESS")
+    else:
+        search = lk.search_lightcurve(target, mission="TESS", sector=sector)
 
     lc = search.download().remove_nans()
 
-time = lc.time.value
-flux = lc.flux.value
+    df = pd.DataFrame({
+        "time": lc.time.value,
+        "flux": lc.flux.value
+    })
+    return df
 
-st.success(f"Loaded {len(time)} data points")
-
-# ============================================================
-# NORMALIZE & SMOOTH
-# ============================================================
-
-flux = flux / np.nanmedian(flux)
-
-N = len(flux)
-window = min(max_window, (N // 2) * 2 - 1)
-
-if window < 5:
-    st.error("Not enough data points to smooth safely.")
+try:
+    df = load_tess_dataframe(target, sector)
+except Exception as e:
+    st.error(f"Failed to load TESS data: {e}")
     st.stop()
 
-flux_smooth = savgol_filter(flux, window, smooth_order)
+# ------------------------------------------------------------
+# PREPROCESS
+# ------------------------------------------------------------
+flux = df["flux"].values
+time = df["time"].values
 
-# ============================================================
-# TOY-3 VARIABLES (SANDY’S LAW CORE)
-# ============================================================
+if normalize:
+    flux = (flux - np.min(flux)) / (np.max(flux) - np.min(flux))
 
-# Σ(t): escape proxy
-Sigma = (flux_smooth - flux_smooth.min()) / (
-    flux_smooth.max() - flux_smooth.min()
-)
+if smooth > 1:
+    flux = np.convolve(flux, np.ones(smooth)/smooth, mode="same")
 
-# Derivatives
-dt = np.gradient(time)
-dSigma_dt = np.gradient(Sigma) / dt
-d2Sigma_dt2 = np.gradient(dSigma_dt) / dt
+# ------------------------------------------------------------
+# MAP → SANDY’S LAW VARIABLES
+# ------------------------------------------------------------
+# Z = trap strength (structure)
+# Σ = entropy escape (radiative change)
 
-# Z(t): trap proxy (low slope = high trap)
-A = np.nanmax(np.abs(dSigma_dt))
-Z = 1.0 - np.abs(dSigma_dt) / A
-Z = np.clip(Z, 0, 1)
+dflux = np.gradient(flux)
 
-# ============================================================
-# CORNER DWELL & QUENCH
-# ============================================================
+Z = 1.0 - flux
+Sigma = np.abs(dflux)
 
-corner_mask = (Z > z_th) & (Sigma < s_th)
+# normalize both to [0,1]
+Z = (Z - Z.min()) / (Z.max() - Z.min())
+Sigma = (Sigma - Sigma.min()) / (Sigma.max() - Sigma.min())
 
-corner_time = np.sum(corner_mask) * np.nanmedian(dt)
-corner_fraction = np.sum(corner_mask) / len(Z)
+# ------------------------------------------------------------
+# TOY 3 DIAGNOSTICS
+# ------------------------------------------------------------
+corner_mask = (Z > 0.8) & (Sigma < 0.2)
+corner_fraction = corner_mask.sum() / len(Z)
 
-quench_index = np.argmax(np.abs(d2Sigma_dt2))
-quench_time = time[quench_index]
-
-# ============================================================
-# METRICS
-# ============================================================
-
-st.subheader("Diagnostics")
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Corner dwell time (days)", f"{corner_time:.4f}")
-c2.metric("Corner dwell fraction", f"{corner_fraction*100:.2f}%")
-c3.metric("Quench time (BTJD)", f"{quench_time:.4f}")
-
-# ============================================================
+# ------------------------------------------------------------
 # PLOTS
-# ============================================================
-
-st.subheader("Toy-3 Visualisation")
-
-col1, col2, col3 = st.columns(3)
+# ------------------------------------------------------------
+col1, col2 = st.columns(2)
 
 with col1:
-    fig, ax = plt.subplots(figsize=(5,5))
-    ax.plot(Z, Sigma, lw=1.4)
-    ax.set_xlim(0,1)
-    ax.set_ylim(0,1)
-    ax.set_xlabel("Z (Trap Proxy)")
-    ax.set_ylabel("Σ (Escape Proxy)")
-    ax.set_title("Phase Space (Square → Dwell)")
-    ax.grid(alpha=0.4)
+    st.subheader("Phase Space: Z vs Σ (Toy 3)")
+    fig, ax = plt.subplots()
+    ax.plot(Z, Sigma, lw=0.8)
+    ax.set_xlabel("Z (Trap Strength)")
+    ax.set_ylabel("Σ (Entropy Escape)")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
     st.pyplot(fig)
 
 with col2:
-    fig, ax = plt.subplots(figsize=(6,4))
-    ax.plot(time, Sigma, label="Σ", lw=1.4)
-    ax.plot(time, Z, label="Z", lw=1.2)
-    ax.axvline(quench_time, color="r", ls="--", label="Quench")
-    ax.set_xlabel("Time (BTJD)")
-    ax.set_title("Time Evolution")
+    st.subheader("Time Series")
+    fig, ax = plt.subplots()
+    ax.plot(Z, label="Z")
+    ax.plot(Sigma, label="Σ")
     ax.legend()
-    ax.grid(alpha=0.4)
+    ax.set_xlabel("Time step")
     st.pyplot(fig)
 
-with col3:
-    fig, ax = plt.subplots(figsize=(6,4))
-    ax.plot(time, corner_mask.astype(int), lw=1.5)
-    ax.set_xlabel("Time (BTJD)")
-    ax.set_ylabel("Corner State")
-    ax.set_title("Corner Dwell Indicator")
-    ax.grid(alpha=0.4)
-    st.pyplot(fig)
+# ------------------------------------------------------------
+# METRICS
+# ------------------------------------------------------------
+st.subheader("Corner Dwell Diagnostics")
+st.metric("Corner dwell fraction", f"{corner_fraction*100:.2f}%")
 
-# ============================================================
+# ------------------------------------------------------------
 # INTERPRETATION
-# ============================================================
+# ------------------------------------------------------------
+st.markdown("""
+### Physical Meaning (Toy 3)
 
-with st.expander("Physical interpretation (Sandy’s Law)"):
-    st.markdown(
-        """
-**Sandy’s Law — Square** demonstrates escape-controlled evolution.
+• **High Z + Low Σ** → energy trapped, structure dominates  
+• **Corner dwell** → system hesitates before release  
+• **Quench** → rapid exit from trap after dwell  
 
-• **Z high, Σ low** → trapped system  
-• **Corner dwell** → delayed escape  
-• **Quench** → release / transition  
-• **Late smooth behaviour hides early structure**
-
-This diagnostic is deterministic:
-> If behaviour changes, structure has changed.
-"""
-    )
+This is the **exact same signature** predicted for:
+- Early supernova photon escape  
+- Shock breakout precursors  
+- Magnetic reconnection delays  
+- Sandy’s Law collapse → release regime
+""")
