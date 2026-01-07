@@ -20,10 +20,24 @@ st.caption("Event structure only • No flowing time • Photon-domain instrumen
 # =====================================================
 st.header("1️⃣ Input: Event List (No Time)")
 
+st.markdown(
+    """
+Paste or upload **events only**.
+
+Accepted formats:
+- `flux`
+- `flux` (single column, no header)
+- `index,flux`
+- any 1–2 column CSV (flux inferred)
+
+**Time is not used.**
+"""
+)
+
 csv_text = st.text_area(
-    "Paste CSV (required column: flux)",
+    "Paste CSV",
     height=220,
-    placeholder="index,flux\n0,1.01\n1,1.02\n2,1.01\n..."
+    placeholder="flux\n1.01\n1.02\n0.99\n1.03\n..."
 )
 
 uploaded = st.file_uploader("or upload CSV", type=["csv"])
@@ -32,26 +46,40 @@ if not csv_text.strip() and uploaded is None:
     st.info("Paste or upload event data to begin.")
     st.stop()
 
+# =====================================================
+# ROBUST CSV PARSER (FIXED)
+# =====================================================
 try:
     if uploaded is not None:
-        df = pd.read_csv(uploaded)
+        raw = pd.read_csv(uploaded, header=None)
     else:
-        df = pd.read_csv(StringIO(csv_text))
+        raw = pd.read_csv(StringIO(csv_text), header=None)
 except Exception as e:
     st.error(f"CSV parse error: {e}")
     st.stop()
 
-if "flux" not in [c.lower() for c in df.columns]:
-    st.error("CSV must contain a 'flux' column")
-    st.stop()
+# Attempt to detect header
+first_row = raw.iloc[0].astype(str).str.lower().tolist()
 
-flux = df[df.columns[[c.lower() for c in df.columns].index("flux")]].astype(float).values
+if "flux" in first_row:
+    raw.columns = first_row
+    data = raw.iloc[1:]
+    flux = pd.to_numeric(data["flux"], errors="coerce").values
+else:
+    # No header → infer flux column
+    if raw.shape[1] == 1:
+        flux = pd.to_numeric(raw.iloc[:, 0], errors="coerce").values
+    else:
+        # assume flux is second column
+        flux = pd.to_numeric(raw.iloc[:, 1], errors="coerce").values
+
 flux = flux[np.isfinite(flux)]
 
-N = len(flux)
-if N < 12:
-    st.error("Not enough events to form squares.")
+if len(flux) < 12:
+    st.error("At least 12 events required to form square structure.")
     st.stop()
+
+N = len(flux)
 
 # =====================================================
 # CONTROLS
@@ -59,25 +87,18 @@ if N < 12:
 st.sidebar.header("Controls")
 
 square_window = st.sidebar.slider("Square window (events)", 4, 20, 6, 1)
-smooth = st.sidebar.slider("Flux smoothing", 1, 31, 7, 2)
+smooth = st.sidebar.slider("Flux smoothing (structure only)", 1, 31, 7, 2)
 corner_th = st.sidebar.slider("Corner threshold", 0.70, 0.95, 0.85, 0.01)
 
-A_th = st.sidebar.slider(
-    "A_th (independence area threshold)",
-    0.01, 0.90, 0.25, 0.01
-)
-
-C_th = st.sidebar.slider(
-    "C_th (shared-time threshold)",
-    0.01, 0.50, 0.10, 0.01
-)
+A_th = st.sidebar.slider("A_th (independence area)", 0.01, 0.90, 0.25, 0.01)
+C_th = st.sidebar.slider("C_th (shared-time fraction)", 0.01, 0.50, 0.10, 0.01)
 
 # =====================================================
 # Σ = ESCAPE STRUCTURE
 # =====================================================
 def normalize(x):
     lo, hi = np.min(x), np.max(x)
-    return np.zeros_like(x) + 0.5 if hi - lo < 1e-12 else (x - lo) / (hi - lo)
+    return np.full_like(x, 0.5) if hi - lo < 1e-12 else (x - lo) / (hi - lo)
 
 if smooth > 1:
     flux_s = (
@@ -140,20 +161,17 @@ for i in range(len(square_boxes)):
     z1_min, z1_max, s1_min, s1_max = square_boxes[i]
     for j in range(i + 1, len(square_boxes)):
         z2_min, z2_max, s2_min, s2_max = square_boxes[j]
-
-        overlap = (
+        if (
             z1_min <= z2_max and z2_min <= z1_max and
             s1_min <= s2_max and s2_min <= s1_max
-        )
-
-        if overlap:
+        ):
             overlap_count += 1
         total_pairs += 1
 
-overlap_fraction = overlap_count / total_pairs if total_pairs > 0 else 0.0
+overlap_fraction = overlap_count / total_pairs if total_pairs else 0.0
 
 # =====================================================
-# TOY-3 CORNER LOCK (SHARED TIME)
+# SHARED TIME (CORNER LOCK)
 # =====================================================
 in_corner = (Z > corner_th) & (Sigma > corner_th)
 shared_fraction = in_corner.mean()
@@ -212,14 +230,12 @@ else:
 with st.expander("Interpretation (Locked)"):
     st.markdown(
         """
+• **Squares** = local independent traversal  
 • **Square area** = independence / exhaust capacity  
-• **Overlap** = reuse of structure (not failure by itself)  
-• **Shared-time fraction** = phase lock  
+• **Overlap** = reuse of structure (not failure alone)  
+• **Corner dwell** = shared phase time  
 
-Exhaust saturation requires **small area + high overlap**.  
-Shared time requires **sustained corner dwell**.
-
-Time does not flow here.
-Time is a **phase label**.
+Time does **not** flow here.  
+Time is a **phase label** that appears only after exhaust fails.
 """
     )
