@@ -1,7 +1,4 @@
 streamlit>=1.32
-lightkurve>=2.4
 numpy>=1.23
-scipy>=1.10
+pandas>=2.0
 matplotlib>=3.7
-astropy>=5.3
-pandas
