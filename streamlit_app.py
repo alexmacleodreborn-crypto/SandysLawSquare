@@ -16,17 +16,9 @@ st.title("Sandy’s Law — Square Tiling, Exhaust & Shared Time")
 st.caption("Event structure only • No flowing time • Photon-domain instrument")
 
 # =====================================================
-# INPUT: EVENTS ONLY
+# INPUT
 # =====================================================
 st.header("1️⃣ Input: Event List (No Time)")
-
-st.markdown(
-    """
-The CSV contains **events only**.
-There is **no time variable**.
-Ordering is a label, not a clock.
-"""
-)
 
 csv_text = st.text_area(
     "Paste CSV (required column: flux)",
@@ -49,12 +41,11 @@ except Exception as e:
     st.error(f"CSV parse error: {e}")
     st.stop()
 
-cols = [c.lower() for c in df.columns]
-if "flux" not in cols:
+if "flux" not in [c.lower() for c in df.columns]:
     st.error("CSV must contain a 'flux' column")
     st.stop()
 
-flux = df[df.columns[cols.index("flux")]].astype(float).values
+flux = df[df.columns[[c.lower() for c in df.columns].index("flux")]].astype(float).values
 flux = flux[np.isfinite(flux)]
 
 N = len(flux)
@@ -67,19 +58,18 @@ if N < 12:
 # =====================================================
 st.sidebar.header("Controls")
 
-square_window = st.sidebar.slider(
-    "Local square window (events)",
-    4, 20, 6, 1
+square_window = st.sidebar.slider("Square window (events)", 4, 20, 6, 1)
+smooth = st.sidebar.slider("Flux smoothing", 1, 31, 7, 2)
+corner_th = st.sidebar.slider("Corner threshold", 0.70, 0.95, 0.85, 0.01)
+
+A_th = st.sidebar.slider(
+    "A_th (independence area threshold)",
+    0.01, 0.90, 0.25, 0.01
 )
 
-smooth = st.sidebar.slider(
-    "Flux smoothing (structure only)",
-    1, 31, 7, 2
-)
-
-corner_th = st.sidebar.slider(
-    "Toy-3 corner threshold",
-    0.70, 0.95, 0.85, 0.01
+C_th = st.sidebar.slider(
+    "C_th (shared-time threshold)",
+    0.01, 0.50, 0.10, 0.01
 )
 
 # =====================================================
@@ -87,9 +77,7 @@ corner_th = st.sidebar.slider(
 # =====================================================
 def normalize(x):
     lo, hi = np.min(x), np.max(x)
-    if hi - lo < 1e-12:
-        return np.full_like(x, 0.5)
-    return (x - lo) / (hi - lo)
+    return np.zeros_like(x) + 0.5 if hi - lo < 1e-12 else (x - lo) / (hi - lo)
 
 if smooth > 1:
     flux_s = (
@@ -113,12 +101,11 @@ tau = tau / np.max(tau)
 # =====================================================
 # Z = TRAP STRENGTH
 # =====================================================
-dSigma_dtau = np.gradient(Sigma, tau, edge_order=1)
-Z = 1.0 - np.abs(dSigma_dtau)
+Z = 1.0 - np.abs(np.gradient(Sigma, tau, edge_order=1))
 Z = np.clip(Z, 0.0, 1.0)
 
 # =====================================================
-# LOCAL SQUARE CONSTRUCTION
+# SQUARE CONSTRUCTION
 # =====================================================
 squares = []
 square_boxes = []
@@ -141,11 +128,10 @@ for i in range(N - square_window):
     ))
 
 square_areas = np.array(square_areas)
-
 mean_square_area = float(np.mean(square_areas))
 
 # =====================================================
-# SQUARE OVERLAP (EXHAUST SATURATION)
+# OVERLAP (EXHAUST SATURATION)
 # =====================================================
 overlap_count = 0
 total_pairs = 0
@@ -167,40 +153,29 @@ for i in range(len(square_boxes)):
 overlap_fraction = overlap_count / total_pairs if total_pairs > 0 else 0.0
 
 # =====================================================
-# TOY-3 CORNER LOCKING (SHARED TIME)
+# TOY-3 CORNER LOCK (SHARED TIME)
 # =====================================================
 in_corner = (Z > corner_th) & (Sigma > corner_th)
 shared_fraction = in_corner.mean()
 
 # =====================================================
-# PLOTS
+# PLOT
 # =====================================================
 st.header("2️⃣ Phase Geometry")
 
 fig, ax = plt.subplots(figsize=(6, 6))
 
-# Square loops
 for z_loc, s_loc in squares:
     ax.plot(z_loc, s_loc, color="gray", alpha=0.35, lw=1)
 
-# Global trajectory
 ax.plot(Z, Sigma, color="black", lw=1.8, label="Global path")
-
-# Shared-time dwell
-ax.scatter(
-    Z[in_corner],
-    Sigma[in_corner],
-    c="red",
-    s=14,
-    label="Shared-time dwell"
-)
+ax.scatter(Z[in_corner], Sigma[in_corner], c="red", s=16, label="Shared-time dwell")
 
 ax.set_xlim(0, 1)
 ax.set_ylim(0, 1)
 ax.set_aspect("equal")
 ax.set_xlabel("Z (trap strength)")
 ax.set_ylabel("Σ (escape)")
-ax.set_title("Square Tiling → Overlap → Shared Time")
 ax.legend()
 ax.grid(alpha=0.3)
 
@@ -213,19 +188,23 @@ plt.close(fig)
 st.header("3️⃣ Diagnostics")
 
 c1, c2, c3 = st.columns(3)
-
 c1.metric("Square count", len(square_areas))
 c2.metric("Mean square area", f"{mean_square_area:.4f}")
-c3.metric("Square overlap fraction", f"{100 * overlap_fraction:.2f}%")
+c3.metric("Overlap fraction", f"{100 * overlap_fraction:.2f}%")
 
-if overlap_fraction < 0.05:
-    st.success("Independent regime — exhaust free")
-elif overlap_fraction < 0.15:
+st.metric("Shared-time fraction", f"{100 * shared_fraction:.2f}%")
+
+# =====================================================
+# REGIME CLASSIFICATION (FIXED)
+# =====================================================
+st.header("4️⃣ Regime Classification")
+
+if shared_fraction >= C_th:
+    st.error("Shared-time regime — phase locked")
+elif mean_square_area <= A_th and overlap_fraction > 0.1:
     st.warning("Coupled regime — exhaust saturating")
 else:
-    st.error("Shared-time regime — exhaust collapsed")
-
-st.metric("Shared-time (corner) fraction", f"{100 * shared_fraction:.2f}%")
+    st.success("Independent regime — exhaust free")
 
 # =====================================================
 # INTERPRETATION
@@ -233,17 +212,14 @@ st.metric("Shared-time (corner) fraction", f"{100 * shared_fraction:.2f}%")
 with st.expander("Interpretation (Locked)"):
     st.markdown(
         """
-**How to read this instrument**
+• **Square area** = independence / exhaust capacity  
+• **Overlap** = reuse of structure (not failure by itself)  
+• **Shared-time fraction** = phase lock  
 
-• Gray loops = **local squares** (independent photon traversal)  
-• Square area = **independence / exhaust capacity**  
-• Square overlap = **loss of independence**  
-• Red corner dwell = **shared phase time**  
+Exhaust saturation requires **small area + high overlap**.  
+Shared time requires **sustained corner dwell**.
 
-This is not evolution in time.
-It is **phase geometry of events**.
-
-Independent → Coupled → Shared
-is a **phase sequence**, not a timeline.
+Time does not flow here.
+Time is a **phase label**.
 """
     )
