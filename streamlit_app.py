@@ -2,138 +2,152 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from io import StringIO
 
-# ================================
-# App Config
-# ================================
+# =====================================================
+# App config
+# =====================================================
 st.set_page_config(
-    page_title="Sandy’s Law — Square → Corner → Quench",
+    page_title="Sandy’s Law — Event-Based Square Mapping",
     layout="wide"
 )
 
-st.title("Sandy’s Law — Event-Time Phase Mapping")
-st.caption("τ-based dynamics | No global clock | Structure-driven time")
+st.title("Sandy’s Law — Event-Based Square Mapping")
+st.caption("Event time ≠ constant time | Shared-time emergence | Toy 3 overlay")
 
-# ================================
-# Sidebar Controls
-# ================================
-st.sidebar.header("Controls")
-
-corner_Z = st.sidebar.slider("Corner Z threshold", 0.7, 0.95, 0.85, 0.01)
-corner_S = st.sidebar.slider("Corner Σ threshold", 0.7, 0.95, 0.85, 0.01)
-
-show_toy = st.sidebar.checkbox("Overlay Toy 3 trajectory", True)
-
-# ================================
-# CSV Input
-# ================================
-st.subheader("Paste or Upload Event-Time CSV")
+# =====================================================
+# CSV INPUT
+# =====================================================
+st.header("1️⃣ Paste CSV Lightcurve Data")
 
 csv_text = st.text_area(
-    "Paste CSV here (τ, Z, Σ, Tag)",
-    height=200,
-    placeholder="tau,Z,Sigma,Tag\n0,0.42,0.31,0\n1,0.44,0.33,1\n..."
+    "Paste CSV here (must contain time + flux columns)",
+    height=220,
+    placeholder="time,flux\n0.0,1.02\n0.1,0.98\n..."
 )
 
-uploaded_file = st.file_uploader("or upload CSV file", type=["csv"])
-
-# ================================
-# Load Data
-# ================================
-df = None
-
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-
-elif csv_text.strip():
-    try:
-        df = pd.read_csv(pd.compat.StringIO(csv_text))
-    except Exception as e:
-        st.error(f"CSV parse error: {e}")
-
-if df is None:
-    st.info("Awaiting CSV input.")
+if not csv_text.strip():
     st.stop()
 
-# ================================
-# Validate Columns
-# ================================
-required = {"tau", "Z", "Sigma", "Tag"}
-if not required.issubset(df.columns):
-    st.error(f"CSV must contain columns: {required}")
+# =====================================================
+# LOAD CSV (FIXED)
+# =====================================================
+try:
+    df = pd.read_csv(StringIO(csv_text))
+except Exception as e:
+    st.error(f"CSV parse error: {e}")
     st.stop()
 
-# Sort by event-time
-df = df.sort_values("tau").reset_index(drop=True)
+# Column detection
+cols = [c.lower() for c in df.columns]
 
-# ================================
-# Phase-Space Plot
-# ================================
-fig, ax = plt.subplots(figsize=(6, 6))
+if "time" not in cols or "flux" not in cols:
+    st.error("CSV must contain 'time' and 'flux' columns")
+    st.stop()
 
-ax.plot(
-    df["Z"],
-    df["Sigma"],
-    lw=1.5,
-    label="Observed trajectory"
+time = df[df.columns[cols.index("time")]].values
+flux = df[df.columns[cols.index("flux")]].values
+
+# Clean
+mask = np.isfinite(time) & np.isfinite(flux)
+time = time[mask]
+flux = flux[mask]
+
+# =====================================================
+# EVENT TIME (NOT CONSTANT)
+# =====================================================
+st.header("2️⃣ Event Time Construction")
+
+st.markdown(
+    """
+Time here is **event-derived**, not uniform.
+We compute time **from flux changes**, not clock ticks.
+"""
 )
 
-# Corner region
-ax.axvline(corner_Z, color="red", ls="--", alpha=0.4)
-ax.axhline(corner_S, color="red", ls="--", alpha=0.4)
+# Event time = cumulative flux gradient
+d_flux = np.abs(np.diff(flux, prepend=flux[0]))
+event_time = np.cumsum(d_flux)
 
-ax.fill_betweenx(
-    [corner_S, 1],
-    corner_Z,
-    1,
-    color="red",
-    alpha=0.05,
-    label="Corner (shared-time)"
+# Normalize
+event_time /= np.max(event_time)
+
+# =====================================================
+# MAP TO SANDY’S LAW VARIABLES
+# =====================================================
+st.header("3️⃣ Sandy’s Law Variable Mapping")
+
+Z = (flux - flux.min()) / (flux.max() - flux.min())
+Sigma = (event_time - event_time.min()) / (event_time.max() - event_time.min())
+
+# =====================================================
+# TOY 3: CORNER DWELL → QUENCH
+# =====================================================
+st.header("4️⃣ Toy 3 — Corner Dwell Overlay")
+
+corner_threshold = st.slider("Corner Threshold", 0.7, 0.95, 0.85, 0.01)
+
+in_corner = (
+    ((Z > corner_threshold) & (Sigma > corner_threshold)) |
+    ((Z < 1 - corner_threshold) & (Sigma < 1 - corner_threshold))
 )
 
-# ================================
-# Toy 3 Overlay
-# ================================
-if show_toy:
-    theta = np.linspace(0, 2*np.pi, 400)
-    toy_Z = 0.55 + 0.25 * np.cos(theta)
-    toy_S = 0.55 + 0.25 * np.sin(theta)
-    ax.plot(toy_Z, toy_S, "--", lw=1.2, label="Toy 3 (template)")
+corner_fraction = np.mean(in_corner)
 
-ax.set_xlim(0, 1)
-ax.set_ylim(0, 1)
-ax.set_aspect("equal")
-ax.set_xlabel("Z (trap strength)")
-ax.set_ylabel("Σ (escape)")
-ax.set_title("Phase Space (Event-Time Ordered)")
-ax.legend()
-ax.grid(alpha=0.4)
+# =====================================================
+# PLOTS
+# =====================================================
+col1, col2 = st.columns(2)
 
-st.pyplot(fig)
-plt.close(fig)
+with col1:
+    fig, ax = plt.subplots(figsize=(5,5))
+    ax.plot(Z, Sigma, lw=1)
+    ax.scatter(Z[in_corner], Sigma[in_corner], c="red", s=6)
+    ax.set_xlabel("Z (trap strength)")
+    ax.set_ylabel("Σ (entropy escape)")
+    ax.set_title("Phase Space (Toy 3 Overlay)")
+    ax.set_xlim(0,1)
+    ax.set_ylim(0,1)
+    ax.set_aspect("equal")
+    ax.grid(alpha=0.4)
+    st.pyplot(fig)
 
-# ================================
-# Event-Time Series
-# ================================
-fig2, ax2 = plt.subplots(figsize=(8, 3))
+with col2:
+    fig, ax = plt.subplots(figsize=(6,3))
+    ax.plot(event_time, Z, label="Z")
+    ax.plot(event_time, Sigma, label="Σ")
+    ax.set_xlabel("Event Time")
+    ax.set_ylabel("Value")
+    ax.set_title("Event-Time Series")
+    ax.legend()
+    ax.grid(alpha=0.4)
+    st.pyplot(fig)
 
-ax2.plot(df["tau"], df["Z"], label="Z")
-ax2.plot(df["tau"], df["Sigma"], label="Σ")
+# =====================================================
+# DIAGNOSTICS
+# =====================================================
+st.header("5️⃣ Corner Diagnostics")
 
-ax2.set_xlabel("τ (event-time)")
-ax2.set_ylabel("value")
-ax2.set_title("Event-Time Series (τ)")
-ax2.legend()
-ax2.grid(alpha=0.4)
+st.metric("Corner dwell fraction", f"{corner_fraction*100:.2f}%")
 
-st.pyplot(fig2)
-plt.close(fig2)
+if corner_fraction < 0.05:
+    st.success("Stable regime — no imminent release")
+elif corner_fraction < 0.15:
+    st.warning("Pre-instability — shared-time clustering emerging")
+else:
+    st.error("Critical — collapse / release regime")
 
-# ================================
-# Corner Diagnostics (Toy 3)
-# ================================
-corner_mask = (df["Z"] > corner_Z) & (df["Sigma"] > corner_S)
+# =====================================================
+# INTERPRETATION
+# =====================================================
+with st.expander("Physical Interpretation (Sandy’s Law)"):
+    st.markdown(
+        """
+• **Time is event-derived**, not uniform  
+• **Squares emerge from independent event clocks**  
+• **Corner dwell = shared-time convergence**  
+• **Release occurs when events synchronize in proximity**  
 
-corner_events = df[corner_mask]
-
-dwell_fraction = len
+This matches early light-curve behavior **before peak luminosity**.
+"""
+    )
