@@ -14,6 +14,14 @@ st.caption("Real light curves → Toy 3 (Corner Dwell → Quench)")
 # ============================================================
 
 normalize = st.checkbox("Normalize Flux", value=True)
+
+smooth = st.slider(
+    "Smoothing window (odd number)",
+    min_value=1,
+    max_value=101,
+    value=15,
+    step=2
+)
 # ------------------------------------------------------------
 # PARAMETERS
 # ------------------------------------------------------------
