@@ -2,150 +2,187 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import lightkurve as lk
-
-st.set_page_config(page_title="Sandy’s Law — Square (TESS)", layout="wide")
-
-st.title("Sandy’s Law — Square Phase Space (TESS)")
-st.caption("Real light curves → Toy 3 (Corner Dwell → Quench)")
+from scipy.signal import savgol_filter
 
 # ============================================================
-# PREPROCESSING OPTIONS
+# STREAMLIT CONFIG
 # ============================================================
 
-normalize = st.checkbox("Normalize Flux", value=True)
+st.set_page_config(
+    page_title="Sandy’s Law — Square (CSV)",
+    layout="wide"
+)
 
-smooth = st.slider(
-    "Smoothing window (odd number)",
+st.title("Sandy’s Law — Square (CSV)")
+st.caption("Real early light curves → Corner Dwell → Quench")
+
+# ============================================================
+# SIDEBAR — INPUT
+# ============================================================
+
+st.sidebar.header("Input Data")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload light curve CSV",
+    type=["csv"]
+)
+
+st.sidebar.markdown("---")
+st.sidebar.header("Preprocessing")
+
+is_magnitude = st.sidebar.checkbox(
+    "Flux column is magnitude (convert to flux)",
+    value=False
+)
+
+normalize = st.sidebar.checkbox(
+    "Normalize flux",
+    value=True
+)
+
+smooth_window = st.sidebar.slider(
+    "Smoothing window (odd)",
     min_value=1,
     max_value=101,
     value=15,
     step=2
 )
-# ------------------------------------------------------------
-# PARAMETERS
-# ------------------------------------------------------------
-target = st.text_input("TESS Target (TIC / KIC / Name)", "TIC 307210830")
-sector = st.number_input(
-    "TESS Sector (0 = auto)",
-    min_value=0,
-    max_value=100,
-    value=0,
-    step=1
-)
-# ============================================================
-# LOAD TESS LIGHT CURVE (ROBUST)
-# ============================================================
 
-df = None
+st.sidebar.markdown("---")
+st.sidebar.header("Toy-3 Parameters")
 
-with st.spinner("Loading TESS light curve..."):
-    search = lk.search_lightcurve(target, mission="TESS")
-
-    if len(search) == 0:
-        st.error("No TESS products found for this target.")
-        st.stop()
-
-    lc = search.download()
-
-    if lc is None:
-        st.error(
-            "TESS search returned results, but no downloadable light curve "
-            "is available for this target.\n\n"
-            "Try a different target."
-        )
-        st.stop()
-
-    lc = lc.remove_nans()
-
-    df = pd.DataFrame({
-        "time": lc.time.value,
-        "flux": lc.flux.value
-    })
+z_th = st.sidebar.slider("Z threshold (trap)", 0.5, 0.95, 0.7, 0.01)
+s_th = st.sidebar.slider("Σ threshold (escape)", 0.05, 0.5, 0.25, 0.01)
 
 # ============================================================
-# SAFETY CHECK (MANDATORY)
+# LOAD CSV
 # ============================================================
 
-if df is None or df.empty:
-    st.error("Light curve failed to load correctly.")
+if uploaded_file is None:
+    st.info("Upload a CSV file to begin.")
     st.stop()
-# ------------------------------------------------------------
-# PREPROCESS
-# ------------------------------------------------------------
-flux = df["flux"].values
-time = df["time"].values
+
+df = pd.read_csv(uploaded_file)
+
+required_cols = {"time", "flux"}
+if not required_cols.issubset(df.columns):
+    st.error("CSV must contain columns: time, flux")
+    st.stop()
+
+df = df.sort_values("time")
+
+time = df["time"].values.astype(float)
+flux = df["flux"].values.astype(float)
+
+# ============================================================
+# MAG → FLUX (optional)
+# ============================================================
+
+if is_magnitude:
+    flux = 10 ** (-0.4 * flux)
+
+# ============================================================
+# NORMALIZE & SMOOTH
+# ============================================================
 
 if normalize:
     flux = (flux - np.min(flux)) / (np.max(flux) - np.min(flux))
 
-if smooth > 1:
-    flux = np.convolve(flux, np.ones(smooth)/smooth, mode="same")
+if smooth_window > 1:
+    if smooth_window >= len(flux):
+        st.error("Smoothing window too large for dataset.")
+        st.stop()
+    flux = savgol_filter(flux, smooth_window, polyorder=2)
 
-# ------------------------------------------------------------
-# MAP → SANDY’S LAW VARIABLES
-# ------------------------------------------------------------
-# Z = trap strength (structure)
-# Σ = entropy escape (radiative change)
+# ============================================================
+# SANDY’S LAW VARIABLES
+# ============================================================
 
-dflux = np.gradient(flux)
-
-Z = 1.0 - flux
-Sigma = np.abs(dflux)
-
-# normalize both to [0,1]
-Z = (Z - Z.min()) / (Z.max() - Z.min())
+# Σ(t): escape proxy (rate of change)
+Sigma = np.abs(np.gradient(flux, time))
 Sigma = (Sigma - Sigma.min()) / (Sigma.max() - Sigma.min())
 
-# ------------------------------------------------------------
-# TOY 3 DIAGNOSTICS
-# ------------------------------------------------------------
-corner_mask = (Z > 0.8) & (Sigma < 0.2)
-corner_fraction = corner_mask.sum() / len(Z)
+# Z(t): trap proxy (inverse activity)
+Z = 1.0 - flux
+Z = (Z - Z.min()) / (Z.max() - Z.min())
 
-# ------------------------------------------------------------
+# ============================================================
+# CORNER DWELL & QUENCH
+# ============================================================
+
+corner_mask = (Z > z_th) & (Sigma < s_th)
+
+dt = np.median(np.diff(time))
+corner_time = np.sum(corner_mask) * dt
+corner_fraction = np.sum(corner_mask) / len(Z)
+
+# quench = max curvature
+d2 = np.gradient(np.gradient(Sigma, time), time)
+quench_index = np.argmax(np.abs(d2))
+quench_time = time[quench_index]
+
+# ============================================================
+# METRICS
+# ============================================================
+
+st.subheader("Diagnostics")
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Corner dwell time", f"{corner_time:.3f}")
+c2.metric("Corner dwell fraction", f"{corner_fraction*100:.2f}%")
+c3.metric("Quench time", f"{quench_time:.3f}")
+
+# ============================================================
 # PLOTS
-# ------------------------------------------------------------
-col1, col2 = st.columns(2)
+# ============================================================
+
+st.subheader("Sandy’s Law — Square")
+
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.subheader("Phase Space: Z vs Σ (Toy 3)")
-    fig, ax = plt.subplots()
-    ax.plot(Z, Sigma, lw=0.8)
+    fig, ax = plt.subplots(figsize=(5,5))
+    ax.plot(Z, Sigma, lw=1.4)
+    ax.set_xlim(0,1)
+    ax.set_ylim(0,1)
     ax.set_xlabel("Z (Trap Strength)")
-    ax.set_ylabel("Σ (Entropy Escape)")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    ax.set_ylabel("Σ (Escape)")
+    ax.set_title("Phase Space")
+    ax.grid(alpha=0.4)
     st.pyplot(fig)
 
 with col2:
-    st.subheader("Time Series")
-    fig, ax = plt.subplots()
-    ax.plot(Z, label="Z")
-    ax.plot(Sigma, label="Σ")
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(time, flux, lw=1.4)
+    ax.axvline(quench_time, color="r", ls="--", label="Quench")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Flux")
+    ax.set_title("Light Curve")
     ax.legend()
-    ax.set_xlabel("Time step")
+    ax.grid(alpha=0.4)
     st.pyplot(fig)
 
-# ------------------------------------------------------------
-# METRICS
-# ------------------------------------------------------------
-st.subheader("Corner Dwell Diagnostics")
-st.metric("Corner dwell fraction", f"{corner_fraction*100:.2f}%")
+with col3:
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(time, corner_mask.astype(int), lw=1.5)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Corner State")
+    ax.set_title("Corner Dwell Indicator")
+    ax.grid(alpha=0.4)
+    st.pyplot(fig)
 
-# ------------------------------------------------------------
+# ============================================================
 # INTERPRETATION
-# ------------------------------------------------------------
-st.markdown("""
-### Physical Meaning (Toy 3)
+# ============================================================
 
-• **High Z + Low Σ** → energy trapped, structure dominates  
-• **Corner dwell** → system hesitates before release  
-• **Quench** → rapid exit from trap after dwell  
+with st.expander("What this means (Sandy’s Law)"):
+    st.markdown(
+        """
+• **High Z + Low Σ** → trapped photon / energy state  
+• **Corner dwell** → delayed escape before visible rise  
+• **Quench** → structural release (shock breakout / diffusion escape)  
 
-This is the **exact same signature** predicted for:
-- Early supernova photon escape  
-- Shock breakout precursors  
-- Magnetic reconnection delays  
-- Sandy’s Law collapse → release regime
-""")
+This diagnostic works **before peak brightness** and is
+**independent of light-curve fitting models**.
+"""
+    )
