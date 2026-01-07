@@ -120,6 +120,51 @@ for i in range(N - square_window):
     squares.append((z_loc, s_loc))
 
 # =====================================================
+# METRICS: SQUARE AREA & OVERLAP
+# =====================================================
+
+square_areas = []
+square_boxes = []
+
+for z_loc, s_loc in squares:
+    dz = np.max(z_loc) - np.min(z_loc)
+    ds = np.max(s_loc) - np.min(s_loc)
+    area = dz * ds
+    square_areas.append(area)
+
+    # bounding box for overlap test
+    square_boxes.append((
+        np.min(z_loc), np.max(z_loc),
+        np.min(s_loc), np.max(s_loc)
+    ))
+
+square_areas = np.array(square_areas)
+
+# Mean square area
+mean_square_area = np.mean(square_areas)
+
+# -----------------------------------------------------
+# Overlap fraction
+# -----------------------------------------------------
+overlap_count = 0
+total_pairs = 0
+
+for i in range(len(square_boxes)):
+    z1_min, z1_max, s1_min, s1_max = square_boxes[i]
+    for j in range(i + 1, len(square_boxes)):
+        z2_min, z2_max, s2_min, s2_max = square_boxes[j]
+
+        overlap = (
+            z1_min <= z2_max and z2_min <= z1_max and
+            s1_min <= s2_max and s2_min <= s1_max
+        )
+
+        if overlap:
+            overlap_count += 1
+        total_pairs += 1
+
+overlap_fraction = overlap_count / total_pairs if total_pairs > 0 else 0.0
+# =====================================================
 # TOY-3 CORNER LOCKING
 # =====================================================
 in_corner = (Z > corner_th) & (Sigma > corner_th)
