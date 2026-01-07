@@ -8,41 +8,32 @@ from io import StringIO
 # CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="Sandy’s Law — Event Geometry (Toy 3)",
+    page_title="Sandy’s Law — Square Overlay → Shared Time",
     layout="wide"
 )
 
-st.title("Sandy’s Law — Event Geometry & Shared Time")
-st.caption("No global time • No flow • Ordering emerges from structure")
+st.title("Sandy’s Law — Square Tiling & Shared Time")
+st.caption("Local independence → square traversal → overlap → Toy-3 locking")
 
 # =====================================================
-# INPUT: EVENTS ONLY
+# INPUT (EVENTS ONLY)
 # =====================================================
-st.header("1️⃣ Input: Event List (No Time)")
-
-st.markdown(
-    """
-The input is **not a light curve in time**.
-
-It is an **ordered list of emission events**.
-The index is only a label — physics does **not** use it.
-"""
-)
+st.header("1️⃣ Event Input (No Time)")
 
 csv_text = st.text_area(
-    "Paste CSV (required columns: index, flux)",
+    "Paste CSV (columns: index, flux)",
     height=220,
-    placeholder="index,flux\n0,1.01\n1,1.02\n2,1.01\n..."
+    placeholder="index,flux\n0,1.01\n1,1.02\n..."
 )
 
 uploaded = st.file_uploader("or upload CSV", type=["csv"])
 
 if not csv_text.strip() and uploaded is None:
-    st.info("Paste or upload event data to begin.")
+    st.info("Paste or upload CSV to begin.")
     st.stop()
 
 try:
-    if uploaded is not None:
+    if uploaded:
         df = pd.read_csv(uploaded)
     else:
         df = pd.read_csv(StringIO(csv_text))
@@ -50,17 +41,16 @@ except Exception as e:
     st.error(f"CSV parse error: {e}")
     st.stop()
 
-# Validate
-cols = [c.lower() for c in df.columns]
-if "flux" not in cols:
+if "flux" not in [c.lower() for c in df.columns]:
     st.error("CSV must contain a 'flux' column")
     st.stop()
 
-flux = df[df.columns[cols.index("flux")]].astype(float).values
+flux = df["flux"].astype(float).values
 flux = flux[np.isfinite(flux)]
 
-if len(flux) < 10:
-    st.error("Not enough events.")
+N = len(flux)
+if N < 12:
+    st.error("Not enough events")
     st.stop()
 
 # =====================================================
@@ -68,11 +58,23 @@ if len(flux) < 10:
 # =====================================================
 st.sidebar.header("Controls")
 
-smooth = st.sidebar.slider("Flux smoothing (structure only)", 1, 31, 9, 2)
-corner_th = st.sidebar.slider("Shared-time corner threshold", 0.70, 0.95, 0.85, 0.01)
+square_window = st.sidebar.slider(
+    "Local square window (events)",
+    4, 20, 6, 1
+)
+
+smooth = st.sidebar.slider(
+    "Flux smoothing",
+    1, 31, 7, 2
+)
+
+corner_th = st.sidebar.slider(
+    "Toy-3 corner threshold",
+    0.70, 0.95, 0.85, 0.01
+)
 
 # =====================================================
-# Σ = ESCAPE (STRUCTURE ONLY)
+# Σ = ESCAPE STRUCTURE
 # =====================================================
 def normalize(x):
     lo, hi = np.min(x), np.max(x)
@@ -93,108 +95,104 @@ else:
 Sigma = normalize(flux_s)
 
 # =====================================================
-# τ = EMERGENT COORDINATE (NOT TIME FLOW)
+# τ = STRUCTURAL COORDINATE (NOT TIME)
 # =====================================================
-# τ is an ordering coordinate induced by structural change
 dSigma = np.abs(np.diff(Sigma, prepend=Sigma[0]))
 tau = np.cumsum(dSigma)
-
-if np.max(tau) > 0:
-    tau = tau / np.max(tau)
+tau = tau / np.max(tau)
 
 # =====================================================
-# Z = TRAP STRENGTH (GEOMETRIC)
+# Z = TRAP STRENGTH
 # =====================================================
-# Resistance to change in Σ along τ
 dSigma_dtau = np.gradient(Sigma, tau, edge_order=1)
 Z = 1.0 - np.abs(dSigma_dtau)
-Z = np.clip(Z, 0.0, 1.0)
+Z = np.clip(Z, 0, 1)
 
 # =====================================================
-# TOY 3: SHARED-TIME GEOMETRY
+# LOCAL SQUARE CONSTRUCTION (RESTORED)
+# =====================================================
+# Squares = bounded traversal inside sliding windows
+
+squares = []
+for i in range(N - square_window):
+    z_loc = Z[i:i+square_window]
+    s_loc = Sigma[i:i+square_window]
+    squares.append((z_loc, s_loc))
+
+# =====================================================
+# TOY-3 CORNER LOCKING
 # =====================================================
 in_corner = (Z > corner_th) & (Sigma > corner_th)
 
-tags = np.zeros(len(Z), dtype=int)
-for i in range(len(Z)):
-    frac = in_corner[: i + 1].mean()
-    if frac < 0.03:
-        tags[i] = 0      # Independent
-    elif frac < 0.10:
-        tags[i] = 1      # Coupled
-    else:
-        tags[i] = 2      # Shared
+shared_frac = in_corner.mean()
 
-shared_idx = np.where(tags == 2)[0]
-shared_tau = tau[shared_idx[0]] if len(shared_idx) else None
+# =====================================================
+# PLOTS
+# =====================================================
+st.header("2️⃣ Phase Geometry")
+
+fig, ax = plt.subplots(figsize=(6,6))
+
+# Plot all square loops
+for z_loc, s_loc in squares:
+    ax.plot(z_loc, s_loc, color="gray", alpha=0.35, lw=1)
+
+# Global trajectory
+ax.plot(Z, Sigma, color="black", lw=1.8, label="Global path")
+
+# Corner dwell
+ax.scatter(
+    Z[in_corner],
+    Sigma[in_corner],
+    c="red",
+    s=14,
+    label="Shared-time dwell"
+)
+
+ax.set_xlim(0,1)
+ax.set_ylim(0,1)
+ax.set_aspect("equal")
+ax.set_xlabel("Z (trap strength)")
+ax.set_ylabel("Σ (escape)")
+ax.set_title("Square Tiling → Overlap → Shared Time")
+ax.legend()
+ax.grid(alpha=0.3)
+
+st.pyplot(fig)
+plt.close(fig)
 
 # =====================================================
 # DIAGNOSTICS
 # =====================================================
-st.header("2️⃣ Regime Diagnostics")
+st.header("3️⃣ Diagnostics")
 
 c1, c2 = st.columns(2)
 
-c1.metric("Shared-time fraction", f"{100*in_corner.mean():.2f}%")
-c2.metric("Shared-time onset (τ)", "—" if shared_tau is None else f"{shared_tau:.3f}")
+c1.metric("Square count", len(squares))
+c2.metric("Shared-time fraction", f"{100*shared_frac:.2f}%")
 
-if shared_tau is None:
-    st.success("Independent regime (no shared time)")
-elif in_corner.mean() < 0.15:
-    st.warning("Partial coupling (incipient shared time)")
+if shared_frac < 0.05:
+    st.success("Independent regime — square tiling only")
+elif shared_frac < 0.15:
+    st.warning("Square overlap — coupling emerging")
 else:
-    st.error("Shared-time regime (Toy-3 corner locking)")
-
-# =====================================================
-# PLOTS (GEOMETRIC, NOT TEMPORAL)
-# =====================================================
-st.header("3️⃣ Geometric Plots")
-
-# Flux vs event index (label only)
-fig, ax = plt.subplots(figsize=(8,3))
-ax.plot(flux, lw=1.2)
-ax.set_xlabel("event index (label only)")
-ax.set_ylabel("flux")
-ax.set_title("Event Flux (no time implied)")
-ax.grid(alpha=0.3)
-st.pyplot(fig); plt.close(fig)
-
-# Phase space
-fig, ax = plt.subplots(figsize=(6,6))
-ax.plot(Z, Sigma, lw=1.2)
-ax.scatter(Z[in_corner], Sigma[in_corner], c="red", s=10, label="shared-time dwell")
-ax.set_xlim(0,1); ax.set_ylim(0,1)
-ax.set_aspect("equal")
-ax.set_xlabel("Z (trap strength)")
-ax.set_ylabel("Σ (escape)")
-ax.set_title("Phase Geometry (Toy 3)")
-ax.legend()
-ax.grid(alpha=0.3)
-st.pyplot(fig); plt.close(fig)
-
-# Tag geometry
-fig, ax = plt.subplots(figsize=(8,2.5))
-ax.plot(tags, drawstyle="steps-post")
-ax.set_yticks([0,1,2])
-ax.set_yticklabels(["Independent","Coupled","Shared"])
-ax.set_xlabel("event index")
-ax.set_title("Emergence of Shared Time (no flow)")
-ax.grid(alpha=0.3)
-st.pyplot(fig); plt.close(fig)
+    st.error("Shared-time regime — Toy-3 locking")
 
 # =====================================================
 # INTERPRETATION
 # =====================================================
-with st.expander("Interpretation (Locked)"):
+with st.expander("Interpretation (RESTORED)"):
     st.markdown(
         """
-• There is **no time variable** in this model  
-• Events are **not evolving** — they are **related**  
-• τ is a **coordinate of structure**, not duration  
-• Shared time is **detected**, not assumed  
-• Toy 3 is **pure geometry**, not dynamics  
+**What you are seeing:**
 
-Nothing here flows.
-Only relationships exist.
+• Each gray loop is a **local square**  
+• Squares represent **independent causal traversal**  
+• Many squares can occupy the **same global region**  
+• Overlap destroys independence  
+• Corner locking = **shared time**
+
+This restores the photon-pathway logic:
+local paths → overlap → coordination → release.
 """
     )
