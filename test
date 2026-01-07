@@ -1,0 +1,48 @@
+import lightkurve as lk
+import numpy as np
+import pandas as pd
+
+def safe_norm(x):
+    x = np.asarray(x, float)
+    lo, hi = np.nanmin(x), np.nanmax(x)
+    if hi - lo < 1e-12:
+        return np.full_like(x, 0.5)
+    return (x - lo) / (hi - lo)
+
+def extract_events(flux, smooth=9, q=0.92, min_sep=60):
+    xs = pd.Series(flux).rolling(smooth, center=True, min_periods=1).median().values
+    thr = np.quantile(xs, q)
+    peaks = []
+    for i in range(1, len(xs)-1):
+        if xs[i] > thr and xs[i] >= xs[i-1] and xs[i] >= xs[i+1]:
+            if not peaks or i - peaks[-1] >= min_sep:
+                peaks.append(i)
+    return peaks
+
+def window_to_phase(flux_window):
+    f = np.asarray(flux_window, float)
+    base = np.quantile(f, 0.1)
+    gap = f - base
+    Z = 1 - safe_norm(gap)
+    d = np.abs(np.diff(f, prepend=f[0]))
+    S = safe_norm(d)
+    return Z.mean(), S.mean()
+
+# -------------------------
+# FETCH REAL TESS DATA
+# -------------------------
+tic = "TIC 141914082"
+lc = lk.search_lightcurve(tic, mission="TESS")[0].download()
+flux = lc.flux.value
+
+peaks = extract_events(flux)
+
+rows = []
+for i, p in enumerate(peaks):
+    a, b = max(0, p-120), min(len(flux), p+120)
+    z, s = window_to_phase(flux[a:b])
+    rows.append({"event_id": i, "z": z, "sigma": s})
+
+df = pd.DataFrame(rows)
+df.to_csv("tess_phase_events.csv", index=False)
+print("Saved tess_phase_events.csv")
