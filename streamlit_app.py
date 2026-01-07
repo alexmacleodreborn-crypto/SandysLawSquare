@@ -8,32 +8,40 @@ from io import StringIO
 # CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="Sandy’s Law — Square Overlay → Shared Time",
+    page_title="Sandy’s Law — Square Tiling → Shared Time",
     layout="wide"
 )
 
-st.title("Sandy’s Law — Square Tiling & Shared Time")
-st.caption("Local independence → square traversal → overlap → Toy-3 locking")
+st.title("Sandy’s Law — Square Tiling, Exhaust & Shared Time")
+st.caption("Event structure only • No flowing time • Photon-domain instrument")
 
 # =====================================================
-# INPUT (EVENTS ONLY)
+# INPUT: EVENTS ONLY
 # =====================================================
-st.header("1️⃣ Event Input (No Time)")
+st.header("1️⃣ Input: Event List (No Time)")
+
+st.markdown(
+    """
+The CSV contains **events only**.
+There is **no time variable**.
+Ordering is a label, not a clock.
+"""
+)
 
 csv_text = st.text_area(
-    "Paste CSV (columns: index, flux)",
+    "Paste CSV (required column: flux)",
     height=220,
-    placeholder="index,flux\n0,1.01\n1,1.02\n..."
+    placeholder="index,flux\n0,1.01\n1,1.02\n2,1.01\n..."
 )
 
 uploaded = st.file_uploader("or upload CSV", type=["csv"])
 
 if not csv_text.strip() and uploaded is None:
-    st.info("Paste or upload CSV to begin.")
+    st.info("Paste or upload event data to begin.")
     st.stop()
 
 try:
-    if uploaded:
+    if uploaded is not None:
         df = pd.read_csv(uploaded)
     else:
         df = pd.read_csv(StringIO(csv_text))
@@ -41,16 +49,17 @@ except Exception as e:
     st.error(f"CSV parse error: {e}")
     st.stop()
 
-if "flux" not in [c.lower() for c in df.columns]:
+cols = [c.lower() for c in df.columns]
+if "flux" not in cols:
     st.error("CSV must contain a 'flux' column")
     st.stop()
 
-flux = df["flux"].astype(float).values
+flux = df[df.columns[cols.index("flux")]].astype(float).values
 flux = flux[np.isfinite(flux)]
 
 N = len(flux)
 if N < 12:
-    st.error("Not enough events")
+    st.error("Not enough events to form squares.")
     st.stop()
 
 # =====================================================
@@ -64,7 +73,7 @@ square_window = st.sidebar.slider(
 )
 
 smooth = st.sidebar.slider(
-    "Flux smoothing",
+    "Flux smoothing (structure only)",
     1, 31, 7, 2
 )
 
@@ -106,33 +115,26 @@ tau = tau / np.max(tau)
 # =====================================================
 dSigma_dtau = np.gradient(Sigma, tau, edge_order=1)
 Z = 1.0 - np.abs(dSigma_dtau)
-Z = np.clip(Z, 0, 1)
+Z = np.clip(Z, 0.0, 1.0)
 
 # =====================================================
-# LOCAL SQUARE CONSTRUCTION (RESTORED)
+# LOCAL SQUARE CONSTRUCTION
 # =====================================================
-# Squares = bounded traversal inside sliding windows
-
 squares = []
-for i in range(N - square_window):
-    z_loc = Z[i:i+square_window]
-    s_loc = Sigma[i:i+square_window]
-    squares.append((z_loc, s_loc))
-
-# =====================================================
-# METRICS: SQUARE AREA & OVERLAP
-# =====================================================
-
-square_areas = []
 square_boxes = []
+square_areas = []
 
-for z_loc, s_loc in squares:
+for i in range(N - square_window):
+    z_loc = Z[i:i + square_window]
+    s_loc = Sigma[i:i + square_window]
+
     dz = np.max(z_loc) - np.min(z_loc)
     ds = np.max(s_loc) - np.min(s_loc)
     area = dz * ds
+
+    squares.append((z_loc, s_loc))
     square_areas.append(area)
 
-    # bounding box for overlap test
     square_boxes.append((
         np.min(z_loc), np.max(z_loc),
         np.min(s_loc), np.max(s_loc)
@@ -140,12 +142,11 @@ for z_loc, s_loc in squares:
 
 square_areas = np.array(square_areas)
 
-# Mean square area
-mean_square_area = np.mean(square_areas)
+mean_square_area = float(np.mean(square_areas))
 
-# -----------------------------------------------------
-# Overlap fraction
-# -----------------------------------------------------
+# =====================================================
+# SQUARE OVERLAP (EXHAUST SATURATION)
+# =====================================================
 overlap_count = 0
 total_pairs = 0
 
@@ -164,28 +165,28 @@ for i in range(len(square_boxes)):
         total_pairs += 1
 
 overlap_fraction = overlap_count / total_pairs if total_pairs > 0 else 0.0
+
 # =====================================================
-# TOY-3 CORNER LOCKING
+# TOY-3 CORNER LOCKING (SHARED TIME)
 # =====================================================
 in_corner = (Z > corner_th) & (Sigma > corner_th)
-
-shared_frac = in_corner.mean()
+shared_fraction = in_corner.mean()
 
 # =====================================================
 # PLOTS
 # =====================================================
 st.header("2️⃣ Phase Geometry")
 
-fig, ax = plt.subplots(figsize=(6,6))
+fig, ax = plt.subplots(figsize=(6, 6))
 
-# Plot all square loops
+# Square loops
 for z_loc, s_loc in squares:
     ax.plot(z_loc, s_loc, color="gray", alpha=0.35, lw=1)
 
 # Global trajectory
 ax.plot(Z, Sigma, color="black", lw=1.8, label="Global path")
 
-# Corner dwell
+# Shared-time dwell
 ax.scatter(
     Z[in_corner],
     Sigma[in_corner],
@@ -194,8 +195,8 @@ ax.scatter(
     label="Shared-time dwell"
 )
 
-ax.set_xlim(0,1)
-ax.set_ylim(0,1)
+ax.set_xlim(0, 1)
+ax.set_ylim(0, 1)
 ax.set_aspect("equal")
 ax.set_xlabel("Z (trap strength)")
 ax.set_ylabel("Σ (escape)")
@@ -211,33 +212,38 @@ plt.close(fig)
 # =====================================================
 st.header("3️⃣ Diagnostics")
 
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
 
-c1.metric("Square count", len(squares))
-c2.metric("Shared-time fraction", f"{100*shared_frac:.2f}%")
+c1.metric("Square count", len(square_areas))
+c2.metric("Mean square area", f"{mean_square_area:.4f}")
+c3.metric("Square overlap fraction", f"{100 * overlap_fraction:.2f}%")
 
-if shared_frac < 0.05:
-    st.success("Independent regime — square tiling only")
-elif shared_frac < 0.15:
-    st.warning("Square overlap — coupling emerging")
+if overlap_fraction < 0.05:
+    st.success("Independent regime — exhaust free")
+elif overlap_fraction < 0.15:
+    st.warning("Coupled regime — exhaust saturating")
 else:
-    st.error("Shared-time regime — Toy-3 locking")
+    st.error("Shared-time regime — exhaust collapsed")
+
+st.metric("Shared-time (corner) fraction", f"{100 * shared_fraction:.2f}%")
 
 # =====================================================
 # INTERPRETATION
 # =====================================================
-with st.expander("Interpretation (RESTORED)"):
+with st.expander("Interpretation (Locked)"):
     st.markdown(
         """
-**What you are seeing:**
+**How to read this instrument**
 
-• Each gray loop is a **local square**  
-• Squares represent **independent causal traversal**  
-• Many squares can occupy the **same global region**  
-• Overlap destroys independence  
-• Corner locking = **shared time**
+• Gray loops = **local squares** (independent photon traversal)  
+• Square area = **independence / exhaust capacity**  
+• Square overlap = **loss of independence**  
+• Red corner dwell = **shared phase time**  
 
-This restores the photon-pathway logic:
-local paths → overlap → coordination → release.
+This is not evolution in time.
+It is **phase geometry of events**.
+
+Independent → Coupled → Shared
+is a **phase sequence**, not a timeline.
 """
     )
