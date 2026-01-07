@@ -8,28 +8,37 @@ from io import StringIO
 # CONFIG
 # =====================================================
 st.set_page_config(
-    page_title="Sandy’s Law — Emergent Time (Toy 3)",
+    page_title="Sandy’s Law — Event Geometry (Toy 3)",
     layout="wide"
 )
 
-st.title("Sandy’s Law — Emergent Time from Structure")
-st.caption("CSV time ≠ clock | τ emerges from Σ | Toy-3 structural overlay")
+st.title("Sandy’s Law — Event Geometry & Shared Time")
+st.caption("No global time • No flow • Ordering emerges from structure")
 
 # =====================================================
-# CSV INPUT (OBSERVABLES ONLY)
+# INPUT: EVENTS ONLY
 # =====================================================
-st.header("1️⃣ Input CSV (Observables Only)")
+st.header("1️⃣ Input: Event List (No Time)")
+
+st.markdown(
+    """
+The input is **not a light curve in time**.
+
+It is an **ordered list of emission events**.
+The index is only a label — physics does **not** use it.
+"""
+)
 
 csv_text = st.text_area(
-    "Paste CSV (required columns: time, flux)",
+    "Paste CSV (required columns: index, flux)",
     height=220,
-    placeholder="time,flux\n0.0,1.01\n0.1,1.02\n..."
+    placeholder="index,flux\n0,1.01\n1,1.02\n2,1.01\n..."
 )
 
 uploaded = st.file_uploader("or upload CSV", type=["csv"])
 
 if not csv_text.strip() and uploaded is None:
-    st.info("Paste or upload CSV to begin.")
+    st.info("Paste or upload event data to begin.")
     st.stop()
 
 try:
@@ -43,34 +52,27 @@ except Exception as e:
 
 # Validate
 cols = [c.lower() for c in df.columns]
-if "time" not in cols or "flux" not in cols:
-    st.error("CSV must contain columns: time, flux")
+if "flux" not in cols:
+    st.error("CSV must contain a 'flux' column")
     st.stop()
 
-t = df[df.columns[cols.index("time")]].astype(float).values
 flux = df[df.columns[cols.index("flux")]].astype(float).values
-
-mask = np.isfinite(t) & np.isfinite(flux)
-t, flux = t[mask], flux[mask]
-
-order = np.argsort(t)
-t, flux = t[order], flux[order]
+flux = flux[np.isfinite(flux)]
 
 if len(flux) < 10:
-    st.error("Not enough data points.")
+    st.error("Not enough events.")
     st.stop()
 
 # =====================================================
-# SIDEBAR CONTROLS
+# CONTROLS
 # =====================================================
 st.sidebar.header("Controls")
 
-smooth = st.sidebar.slider("Flux smoothing (median)", 1, 31, 9, 2)
-corner_th = st.sidebar.slider("Toy-3 corner threshold", 0.70, 0.95, 0.85, 0.01)
-early_frac = st.sidebar.slider("Early fraction", 0.10, 0.60, 0.30, 0.05)
+smooth = st.sidebar.slider("Flux smoothing (structure only)", 1, 31, 9, 2)
+corner_th = st.sidebar.slider("Shared-time corner threshold", 0.70, 0.95, 0.85, 0.01)
 
 # =====================================================
-# Σ = ESCAPE (FROM FLUX)
+# Σ = ESCAPE (STRUCTURE ONLY)
 # =====================================================
 def normalize(x):
     lo, hi = np.min(x), np.max(x)
@@ -91,22 +93,25 @@ else:
 Sigma = normalize(flux_s)
 
 # =====================================================
-# τ = EMERGENT LOCAL TIME (STRUCTURE-BASED)
+# τ = EMERGENT COORDINATE (NOT TIME FLOW)
 # =====================================================
-# τ advances ONLY when Σ changes
+# τ is an ordering coordinate induced by structural change
 dSigma = np.abs(np.diff(Sigma, prepend=Sigma[0]))
 tau = np.cumsum(dSigma)
-tau = tau / np.max(tau)
+
+if np.max(tau) > 0:
+    tau = tau / np.max(tau)
 
 # =====================================================
-# Z = TRAP STRENGTH (SLOW Σ CHANGE IN τ)
+# Z = TRAP STRENGTH (GEOMETRIC)
 # =====================================================
+# Resistance to change in Σ along τ
 dSigma_dtau = np.gradient(Sigma, tau, edge_order=1)
 Z = 1.0 - np.abs(dSigma_dtau)
-Z = np.clip(Z, 0, 1)
+Z = np.clip(Z, 0.0, 1.0)
 
 # =====================================================
-# TOY-3: CORNER DWELL + TAGGING
+# TOY 3: SHARED-TIME GEOMETRY
 # =====================================================
 in_corner = (Z > corner_th) & (Sigma > corner_th)
 
@@ -114,7 +119,7 @@ tags = np.zeros(len(Z), dtype=int)
 for i in range(len(Z)):
     frac = in_corner[: i + 1].mean()
     if frac < 0.03:
-        tags[i] = 0      # Local
+        tags[i] = 0      # Independent
     elif frac < 0.10:
         tags[i] = 1      # Coupled
     else:
@@ -123,93 +128,73 @@ for i in range(len(Z)):
 shared_idx = np.where(tags == 2)[0]
 shared_tau = tau[shared_idx[0]] if len(shared_idx) else None
 
-# Early window
-N = len(Z)
-N_e = max(10, int(N * early_frac))
-Z_e, S_e = Z[:N_e], Sigma[:N_e]
-
 # =====================================================
 # DIAGNOSTICS
 # =====================================================
-st.header("2️⃣ Diagnostics")
+st.header("2️⃣ Regime Diagnostics")
 
-c1, c2, c3 = st.columns(3)
+c1, c2 = st.columns(2)
 
-c1.metric("Early dwell %",
-          f"{100*((Z_e>corner_th)&(S_e>corner_th)).mean():.2f}%")
-
-c2.metric("Shared-time onset τ",
-          "—" if shared_tau is None else f"{shared_tau:.3f}")
-
-c3.metric("Total events", len(Z))
+c1.metric("Shared-time fraction", f"{100*in_corner.mean():.2f}%")
+c2.metric("Shared-time onset (τ)", "—" if shared_tau is None else f"{shared_tau:.3f}")
 
 if shared_tau is None:
     st.success("Independent regime (no shared time)")
-elif shared_tau < tau[int(0.4*len(tau))]:
-    st.warning("Early shared time (strong coupling)")
+elif in_corner.mean() < 0.15:
+    st.warning("Partial coupling (incipient shared time)")
 else:
-    st.error("Late shared time (delayed release)")
+    st.error("Shared-time regime (Toy-3 corner locking)")
 
 # =====================================================
-# PLOTS
+# PLOTS (GEOMETRIC, NOT TEMPORAL)
 # =====================================================
-st.header("3️⃣ Plots")
+st.header("3️⃣ Geometric Plots")
 
-# Reference light curve (NOT a clock)
+# Flux vs event index (label only)
 fig, ax = plt.subplots(figsize=(8,3))
-ax.plot(t, flux, alpha=0.5, label="raw flux")
-ax.plot(t, flux_s, lw=1.2, label="smoothed flux")
-ax.set_title("Light Curve (reference only)")
-ax.set_xlabel("observation order")
+ax.plot(flux, lw=1.2)
+ax.set_xlabel("event index (label only)")
 ax.set_ylabel("flux")
-ax.legend()
-ax.grid(alpha=0.3)
-st.pyplot(fig); plt.close(fig)
-
-# Σ and Z vs τ
-fig, ax = plt.subplots(figsize=(8,3))
-ax.plot(tau, Sigma, label="Σ (escape)")
-ax.plot(tau, Z, label="Z (trap)")
-ax.set_title("Derived variables vs emergent τ")
-ax.set_xlabel("τ (local time)")
-ax.legend()
+ax.set_title("Event Flux (no time implied)")
 ax.grid(alpha=0.3)
 st.pyplot(fig); plt.close(fig)
 
 # Phase space
 fig, ax = plt.subplots(figsize=(6,6))
 ax.plot(Z, Sigma, lw=1.2)
-ax.scatter(Z[in_corner], Sigma[in_corner], c="red", s=10, label="corner dwell")
+ax.scatter(Z[in_corner], Sigma[in_corner], c="red", s=10, label="shared-time dwell")
 ax.set_xlim(0,1); ax.set_ylim(0,1)
 ax.set_aspect("equal")
-ax.set_xlabel("Z"); ax.set_ylabel("Σ")
-ax.set_title("Phase Space (Toy-3)")
+ax.set_xlabel("Z (trap strength)")
+ax.set_ylabel("Σ (escape)")
+ax.set_title("Phase Geometry (Toy 3)")
 ax.legend()
 ax.grid(alpha=0.3)
 st.pyplot(fig); plt.close(fig)
 
-# Tag timeline
+# Tag geometry
 fig, ax = plt.subplots(figsize=(8,2.5))
-ax.plot(tau, tags, drawstyle="steps-post")
+ax.plot(tags, drawstyle="steps-post")
 ax.set_yticks([0,1,2])
-ax.set_yticklabels(["Local","Coupled","Shared"])
-ax.set_xlabel("τ")
-ax.set_title("Emergence of Shared Time")
+ax.set_yticklabels(["Independent","Coupled","Shared"])
+ax.set_xlabel("event index")
+ax.set_title("Emergence of Shared Time (no flow)")
 ax.grid(alpha=0.3)
 st.pyplot(fig); plt.close(fig)
 
 # =====================================================
 # INTERPRETATION
 # =====================================================
-with st.expander("Interpretation (LOCKED)"):
+with st.expander("Interpretation (Locked)"):
     st.markdown(
         """
-• CSV time is **never** treated as a clock  
-• τ emerges only from structural change in Σ  
-• Z measures resistance to Σ change  
-• Corner dwell = shared time  
-• Independent regime is a **valid outcome**
+• There is **no time variable** in this model  
+• Events are **not evolving** — they are **related**  
+• τ is a **coordinate of structure**, not duration  
+• Shared time is **detected**, not assumed  
+• Toy 3 is **pure geometry**, not dynamics  
 
-This is a structural test, not a light-curve fit.
+Nothing here flows.
+Only relationships exist.
 """
     )
