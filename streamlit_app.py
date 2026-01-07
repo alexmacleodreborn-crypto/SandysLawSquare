@@ -2,20 +2,21 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from io import StringIO
 
 # ==================================================
 # App config
 # ==================================================
 st.set_page_config(
-    page_title="Sandy’s Law — Square (Toy 3 Mapping)",
+    page_title="Sandy’s Law — Square (Toy 3)",
     layout="wide"
 )
 
-st.title("Sandy’s Law — Map Light Curve → Toy 3 (Z, Σ)")
-st.caption("CSV → Early light curve → Corner dwell diagnostics")
+st.title("Sandy’s Law — CSV → Square → Corner Dwell")
+st.caption("Paste light-curve data → Toy 3 diagnostic")
 
 # ==================================================
-# Utility functions
+# Helper functions
 # ==================================================
 def normalize_01(x):
     x = np.asarray(x, dtype=float)
@@ -34,27 +35,24 @@ def derivative(t, y):
         return np.zeros_like(y)
     return np.gradient(y, t)
 
-def corner_mask(Z, S, th, corner):
+def corner_mask(Z, S, th):
     hi = th
     lo = 1 - th
-    if corner == "UR":
-        return (Z >= hi) & (S >= hi)
-    if corner == "UL":
-        return (Z <= lo) & (S >= hi)
-    if corner == "LR":
-        return (Z >= hi) & (S <= lo)
-    if corner == "LL":
-        return (Z <= lo) & (S <= lo)
-    return np.zeros_like(Z, dtype=bool)
+    return (
+        ((Z >= hi) & (S >= hi)) |
+        ((Z <= lo) & (S >= hi)) |
+        ((Z >= hi) & (S <= lo)) |
+        ((Z <= lo) & (S <= lo))
+    )
 
 def plot_phase(Z, S, title):
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot(Z, S, lw=1.3)
+    ax.plot(Z, S, lw=1.2)
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_aspect("equal")
-    ax.set_xlabel("Z (Trap Strength)")
-    ax.set_ylabel("Σ (Entropy Escape)")
+    ax.set_xlabel("Z (trap strength)")
+    ax.set_ylabel("Σ (entropy escape)")
     ax.set_title(title)
     ax.grid(alpha=0.35)
     st.pyplot(fig)
@@ -73,7 +71,7 @@ def plot_timeseries(t, Z, S):
 
 def plot_lc(t, f, fs):
     fig, ax = plt.subplots(figsize=(8, 3))
-    ax.plot(t, f, alpha=0.6, label="raw")
+    ax.plot(t, f, alpha=0.5, label="raw")
     ax.plot(t, fs, lw=1.2, label="smoothed")
     ax.set_xlabel("time")
     ax.set_ylabel("flux")
@@ -83,46 +81,35 @@ def plot_lc(t, f, fs):
     plt.close(fig)
 
 # ==================================================
-# Sidebar
+# CSV PASTE INPUT
 # ==================================================
-st.sidebar.header("Load CSV")
-uploaded = st.sidebar.file_uploader("Upload light curve CSV", type=["csv"])
+st.subheader("Paste CSV Data")
 
-st.sidebar.header("Preprocess")
-smooth = st.sidebar.slider("Smoothing window", 1, 51, 11, 2)
-
-st.sidebar.header("Toy-3 Mapping")
-z_mode = st.sidebar.radio(
-    "Z definition",
-    [
-        "Z = 1 − |dΣ/dt|  (trap = stability)",
-        "Z = |dΣ/dt|      (trap = rapid change)"
-    ]
+csv_text = st.text_area(
+    "Paste CSV here (must contain time and flux columns)",
+    height=220,
+    placeholder="time,flux\n0.0,1.01\n0.1,1.02\n0.2,1.03"
 )
 
-early_frac = st.sidebar.slider("Early fraction", 0.05, 1.0, 0.25, 0.05)
-corner_th = st.sidebar.slider("Corner threshold", 0.6, 0.95, 0.85, 0.01)
-
-corners = st.sidebar.multiselect(
-    "Corners to measure",
-    ["UR", "UL", "LR", "LL"],
-    default=["UR", "LR"]
-)
-
-# ==================================================
-# Main
-# ==================================================
-if uploaded is None:
-    st.info("Upload the example CSV below to begin.")
+if not csv_text.strip():
+    st.info("Paste CSV data above to begin.")
     st.stop()
 
-df = pd.read_csv(uploaded)
+try:
+    df = pd.read_csv(StringIO(csv_text))
+except Exception as e:
+    st.error(f"CSV parsing failed: {e}")
+    st.stop()
+
+if df.shape[1] < 2:
+    st.error("CSV must contain at least two columns.")
+    st.stop()
 
 time_col = st.selectbox("Time column", df.columns, index=0)
 flux_col = st.selectbox("Flux column", df.columns, index=1)
 
-t = df[time_col].to_numpy(dtype=float)
-f = df[flux_col].to_numpy(dtype=float)
+t = df[time_col].astype(float).to_numpy()
+f = df[flux_col].astype(float).to_numpy()
 
 mask = np.isfinite(t) & np.isfinite(f)
 t, f = t[mask], f[mask]
@@ -130,8 +117,27 @@ t, f = t[mask], f[mask]
 order = np.argsort(t)
 t, f = t[order], f[order]
 
-f_s = rolling_median(f, smooth)
+# ==================================================
+# Controls
+# ==================================================
+st.sidebar.header("Processing")
 
+smooth = st.sidebar.slider("Smoothing window", 1, 51, 11, 2)
+early_frac = st.sidebar.slider("Early fraction", 0.05, 1.0, 0.25, 0.05)
+corner_th = st.sidebar.slider("Corner threshold", 0.6, 0.95, 0.85, 0.01)
+
+z_mode = st.sidebar.radio(
+    "Z definition",
+    [
+        "Z = 1 − |dΣ/dt| (trap = stability)",
+        "Z = |dΣ/dt| (trap = rapid change)"
+    ]
+)
+
+# ==================================================
+# Build Σ and Z
+# ==================================================
+f_s = rolling_median(f, smooth)
 Sigma = normalize_01(f_s)
 
 dS = np.abs(derivative(t, Sigma))
@@ -156,7 +162,7 @@ S_e = Sigma[:n_early]
 st.subheader("Light Curve")
 plot_lc(t, f, f_s)
 
-st.subheader("Derived Time Series")
+st.subheader("Time Series")
 plot_timeseries(t, Z, Sigma)
 
 c1, c2 = st.columns(2)
@@ -166,38 +172,35 @@ with c2:
     plot_phase(Z_e, S_e, "Phase Space (Early)")
 
 # ==================================================
-# Corner diagnostics
+# Toy 3 Diagnostic
 # ==================================================
-st.subheader("🔴 Corner Dwell Diagnostics (Toy 3)")
+st.subheader("🔴 Toy 3 — Corner Dwell Diagnostic")
 
-total = 0.0
-cols = st.columns(len(corners) if corners else 1)
+corner_hits = corner_mask(Z_e, S_e, corner_th)
+dwell_frac = corner_hits.mean()
 
-for i, c in enumerate(corners):
-    mask_c = corner_mask(Z_e, S_e, corner_th, c)
-    frac = mask_c.mean()
-    total += frac
-    cols[i].metric(f"{c} dwell", f"{100*frac:.2f}%")
+st.metric("Corner dwell fraction", f"{100*dwell_frac:.2f}%")
 
-if total < 0.03:
-    st.success("Low dwell → smooth early evolution")
-elif total < 0.10:
-    st.warning("Moderate dwell → precursor structure")
+if dwell_frac < 0.03:
+    st.success("Stable early evolution (no trapping)")
+elif dwell_frac < 0.10:
+    st.warning("Precursor structure detected")
 else:
-    st.error("High dwell → strong Toy-3 corner locking")
+    st.error("Strong corner locking → imminent transition")
 
 # ==================================================
 # Interpretation
 # ==================================================
-with st.expander("Physical meaning (Sandy’s Law)"):
+with st.expander("Physical interpretation (Sandy’s Law)"):
     st.markdown(
         """
-**Σ (entropy escape)** is the observable signal (flux).  
-**Z (trap strength)** is how constrained that signal is.
+**Σ (entropy escape)** is the observable photon output.  
+**Z (trap strength)** measures how constrained that output is.
 
-**Toy 3 statement:**  
-> Systems approaching transition spend *time stuck in corners* of phase space.
+**Toy 3 result:**  
+Systems approaching a transition **spend measurable time trapped in corners**
+of (Z, Σ) phase space.
 
-Early-time **corner dwell** is a measurable precursor.
+This dwell is **observable in early light curves**.
 """
     )
