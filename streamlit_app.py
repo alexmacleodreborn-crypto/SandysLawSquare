@@ -1,231 +1,371 @@
+# square_projection_app.py
+# Streamlit app: Sandy's Law Square Projection (Independent Regime, Exhaust-Free)
+#
+# CSV expected (minimum):
+#   time,value
+# Example:
+#   0, 1.2
+#   1, 1.25
+#
+# Optional columns:
+#   id   (event id)
+#
+# States output:
+#   -1  = "collapse/lock" (negative regime)
+#    0  = "coherent/hold" (stable)
+#   +1  = "escape/drive"  (positive regime)
+
 import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from io import StringIO
 
-# =====================================================
-# CONFIG
-# =====================================================
-st.set_page_config(
-    page_title="Sandy’s Law — Phase Coherence (Toy 3 Overlay)",
-    layout="wide",
-)
+# -----------------------------
+# Helpers
+# -----------------------------
+def robust_z(x: np.ndarray) -> np.ndarray:
+    """Robust z-score using median/MAD."""
+    x = np.asarray(x, dtype=float)
+    med = np.nanmedian(x)
+    mad = np.nanmedian(np.abs(x - med))
+    if mad == 0 or np.isnan(mad):
+        return (x - med) * 0.0
+    return 0.6745 * (x - med) / mad
 
-st.title("Sandy’s Law — Phase Coherence (Toy 3 Overlay)")
-st.caption("Phase-events only • No time ordering • Shared-time emerges via square crowding")
 
-# =====================================================
-# HELPERS
-# =====================================================
-def _norm_colname(c: str) -> str:
-    c = c.strip().lower()
-    # allow sigma aliases
-    if c in {"Σ", "sig", "sigma", "s"}:
-        return "sigma"
-    if c in {"z", "trap", "trapstrength", "trap_strength"}:
-        return "z"
-    if c in {"event", "event_id", "id"}:
-        return "event_id"
-    return c
+def rolling_slope(t: np.ndarray, y: np.ndarray, w: int) -> np.ndarray:
+    """Rolling linear slope (least squares) over window size w."""
+    n = len(y)
+    out = np.full(n, np.nan, dtype=float)
+    if w < 3:
+        return out
 
-def parse_phase_csv(text: str) -> pd.DataFrame:
-    if not text or not text.strip():
-        raise ValueError("Empty CSV.")
-    df = pd.read_csv(StringIO(text))
-    df.columns = [_norm_colname(c) for c in df.columns]
-
-    if "z" not in df.columns or "sigma" not in df.columns:
-        raise ValueError("CSV must contain columns: z, sigma (event_id optional).")
-
-    # keep only needed cols
-    keep = ["event_id", "z", "sigma"] if "event_id" in df.columns else ["z", "sigma"]
-    df = df[keep].copy()
-
-    # numeric + drop nans
-    df["z"] = pd.to_numeric(df["z"], errors="coerce")
-    df["sigma"] = pd.to_numeric(df["sigma"], errors="coerce")
-    df = df.dropna(subset=["z", "sigma"])
-
-    # clamp to [0,1] if user expects phase domain
-    df["z"] = df["z"].clip(0.0, 1.0)
-    df["sigma"] = df["sigma"].clip(0.0, 1.0)
-
-    if "event_id" not in df.columns:
-        df.insert(0, "event_id", np.arange(len(df), dtype=int))
-
-    df["event_id"] = pd.to_numeric(df["event_id"], errors="coerce").fillna(np.arange(len(df))).astype(int)
-    df = df.sort_values("event_id").reset_index(drop=True)
-    return df
-
-def assign_squares(df: pd.DataFrame, bins: int) -> pd.DataFrame:
-    # square index in [0..bins-1]
-    eps = 1e-12
-    zi = np.floor((df["z"].values * (bins - eps))).astype(int)
-    si = np.floor((df["sigma"].values * (bins - eps))).astype(int)
-    zi = np.clip(zi, 0, bins - 1)
-    si = np.clip(si, 0, bins - 1)
-
-    out = df.copy()
-    out["z_bin"] = zi
-    out["s_bin"] = si
-    out["cell"] = out["z_bin"].astype(str) + "_" + out["s_bin"].astype(str)
+    for i in range(w - 1, n):
+        tt = t[i - w + 1 : i + 1]
+        yy = y[i - w + 1 : i + 1]
+        # handle NaNs
+        m = np.isfinite(tt) & np.isfinite(yy)
+        if m.sum() < 3:
+            continue
+        tt2 = tt[m]
+        yy2 = yy[m]
+        tt2 = tt2 - tt2.mean()
+        denom = np.sum(tt2 ** 2)
+        if denom <= 0:
+            continue
+        out[i] = np.sum(tt2 * (yy2 - yy2.mean())) / denom
     return out
 
-def coherence_C_from_occupancy(occ: np.ndarray) -> float:
-    """
-    Concentration / crowding coherence:
-    C = (sum n_i^2 - N) / (N*(N-1))
-    - 0 means all events in distinct cells
-    - 1 means all events in one cell
-    """
-    N = int(np.sum(occ))
-    if N <= 1:
-        return 0.0
-    num = float(np.sum(occ.astype(float) ** 2) - N)
-    den = float(N * (N - 1))
-    return max(0.0, min(1.0, num / den))
 
-def shared_time_fraction(df_binned: pd.DataFrame, min_occ: int) -> float:
-    counts = df_binned["cell"].value_counts()
-    shared_cells = set(counts[counts >= min_occ].index.tolist())
-    if len(df_binned) == 0:
-        return 0.0
-    return float(np.mean(df_binned["cell"].isin(shared_cells)))
+def rolling_var(y: np.ndarray, w: int) -> np.ndarray:
+    n = len(y)
+    out = np.full(n, np.nan, dtype=float)
+    if w < 2:
+        return out
+    for i in range(w - 1, n):
+        yy = y[i - w + 1 : i + 1]
+        m = np.isfinite(yy)
+        if m.sum() < 2:
+            continue
+        out[i] = np.var(yy[m])
+    return out
 
-def run_length_stats(states: np.ndarray):
-    # run-lengths over event index (not time)
-    if len(states) == 0:
-        return 0.0, 0
+
+def assign_state(
+    slope_z: np.ndarray,
+    var_z: np.ndarray,
+    slope_thr: float,
+    var_thr: float,
+) -> np.ndarray:
+    """
+    Independent regime (exhaust-free):
+      +1 if slope strongly positive and not chaotic
+      -1 if slope strongly negative and not chaotic
+       0 otherwise (coherent/hold)
+    Chaos gate: if var_z is too high, force 0 (system is turbulent/noisy)
+    """
+    state = np.zeros_like(slope_z, dtype=int)
+
+    # chaos gate
+    chaos = np.isfinite(var_z) & (np.abs(var_z) >= var_thr)
+
+    pos = np.isfinite(slope_z) & (slope_z >= slope_thr) & (~chaos)
+    neg = np.isfinite(slope_z) & (slope_z <= -slope_thr) & (~chaos)
+
+    state[pos] = 1
+    state[neg] = -1
+    state[~np.isfinite(slope_z)] = 0
+    return state
+
+
+def run_lengths(arr: np.ndarray):
+    """Return list of (start_idx, end_idx, value, length) for runs."""
     runs = []
-    cur = 1
-    for i in range(1, len(states)):
-        if states[i] == states[i - 1]:
-            cur += 1
-        else:
-            runs.append(cur)
-            cur = 1
-    runs.append(cur)
-    return float(np.mean(runs)), int(np.max(runs))
+    if len(arr) == 0:
+        return runs
+    start = 0
+    cur = arr[0]
+    for i in range(1, len(arr)):
+        if arr[i] != cur:
+            runs.append((start, i - 1, cur, i - start))
+            start = i
+            cur = arr[i]
+    runs.append((start, len(arr) - 1, cur, len(arr) - start))
+    return runs
 
-def classify_regime(C: float) -> str:
-    # simple bands you can tune
-    if C >= 0.75:
-        return "Strong macroscopic coherence"
-    if C >= 0.50:
-        return "Emergent coherence"
-    if C >= 0.25:
-        return "Weak coherence"
-    return "Independent regime (exhaust-free)"
 
-def plot_phase_with_grid(df_binned: pd.DataFrame, bins: int, min_occ: int):
-    fig, ax = plt.subplots(figsize=(7, 7))
-
-    # draw grid
-    for k in range(1, bins):
-        ax.axvline(k / bins, linewidth=0.6, alpha=0.15)
-        ax.axhline(k / bins, linewidth=0.6, alpha=0.15)
-
-    # scatter all events
-    ax.scatter(df_binned["z"], df_binned["sigma"], s=25, alpha=0.9)
-
-    # highlight shared-time cells
-    counts = df_binned["cell"].value_counts()
-    shared = counts[counts >= min_occ]
-    for cell, n in shared.items():
-        zb, sb = cell.split("_")
-        zb, sb = int(zb), int(sb)
-        x0, y0 = zb / bins, sb / bins
-        rect = plt.Rectangle((x0, y0), 1 / bins, 1 / bins, fill=False, linewidth=2)
-        ax.add_patch(rect)
-
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_xlabel("Z (trap)")
-    ax.set_ylabel("Σ (escape)")
-    ax.set_title("Phase Geometry (events; shared squares outlined)")
-    ax.grid(True, alpha=0.2)
-    ax.set_aspect("equal", adjustable="box")
-    st.pyplot(fig)
-    plt.close(fig)
-
-def plot_coherence_sweep(df: pd.DataFrame, bins: int):
-    # C(N): take first N events by event_id and compute crowding coherence
-    Cs = []
-    Ns = []
-    for N in range(2, len(df) + 1):
-        sub = df.iloc[:N].copy()
-        subb = assign_squares(sub, bins=bins)
-        occ = subb["cell"].value_counts().values
-        Cs.append(coherence_C_from_occupancy(occ))
-        Ns.append(N)
-
-    fig, ax = plt.subplots(figsize=(7.5, 3.5))
-    ax.plot(Ns, Cs, linewidth=1.5)
-    ax.set_xlabel("Event count N (by event_id order)")
-    ax.set_ylabel("Coherence C")
-    ax.set_title("Coherence Sweep C(N)")
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
-    plt.close(fig)
-
-def state_from_event(df_binned: pd.DataFrame, bins: int, crowd_min: int) -> np.ndarray:
-    """
-    State per event index:
-    -1 = under-crowded (independent)
-     0 = coherent (in shared-time square)
-    +1 = over-crowded (strong crowd; optional)
-    """
-    counts = df_binned["cell"].value_counts()
-    n = df_binned["cell"].map(counts).values
-
-    # map to -1 / 0 / +1
-    # -1: n < crowd_min
-    #  0: crowd_min <= n < 2*crowd_min
-    # +1: n >= 2*crowd_min
-    states = np.full(len(df_binned), -1, dtype=int)
-    states[(n >= crowd_min) & (n < 2 * crowd_min)] = 0
-    states[n >= 2 * crowd_min] = 1
-    return states
-
-def plot_state_grid(states: np.ndarray, rows: int = 3):
-    """
-    Visual square projection of states into a small grid.
-    Columns are event-packed (NOT time).
-    """
-    if len(states) == 0:
-        return
-
-    cols = int(np.ceil(len(states) / rows))
+def build_square_grid(states: np.ndarray, cols: int) -> np.ndarray:
+    """Pack states into a grid with given number of columns."""
+    n = len(states)
+    rows = int(np.ceil(n / cols))
     grid = np.full((rows, cols), np.nan)
-    for idx, s in enumerate(states):
-        r = idx % rows
-        c = idx // rows
-        grid[r, c] = s
+    for i in range(n):
+        r = i // cols
+        c = i % cols
+        grid[r, c] = states[i]
+    return grid
 
-    fig, ax = plt.subplots(figsize=(min(12, 0.6 * cols + 2), 2.5))
-    # map -1,0,1 to grayscale positions for display (no custom colors)
-    # we just show numeric heatmap; Streamlit theme is fine.
-    im = ax.imshow(grid, aspect="auto")
-    ax.set_title("State Grid  (-1 | 0 | +1)   (event-packed →)")
-    ax.set_xlabel("Square columns (event packed →)")
-    ax.set_ylabel("Rows")
-    ax.set_yticks(range(rows))
+
+def plot_square_grid(grid: np.ndarray, title: str):
+    # Map -1,0,1 to numeric palette
+    # We'll use a simple discrete colormap.
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+
+    cmap = ListedColormap(["#d94b4b", "#cfcfcf", "#3fbf6f"])  # red, grey, green
+    norm = BoundaryNorm([-1.5, -0.5, 0.5, 1.5], cmap.N)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.imshow(grid, cmap=cmap, norm=norm, interpolation="nearest", aspect="equal")
+    ax.set_title(title)
     ax.set_xticks([])
-    st.pyplot(fig)
-    plt.close(fig)
+    ax.set_yticks([])
+    ax.set_xlabel("Square columns (time packed →)")
+    ax.set_ylabel("Rows")
+    plt.tight_layout()
+    return fig
 
-# =====================================================
-# INPUT UI
-# =====================================================
-st.header("1️⃣ Paste or Upload Phase Event CSV")
 
-st.markdown(
-    """
-**Expected CSV format (phase-events, not time-series):**
+# -----------------------------
+# UI
+# -----------------------------
+st.set_page_config(page_title="Square Projection (Sandy’s Law)", layout="wide")
+st.title("Square Projection — Independent Regime (Exhaust-Free)")
+st.caption("Paste or upload time-series data → compute states (-1/0/+1) → square projection + persistence/alternation/clusters.")
 
-```csv
-event_id,z,sigma
-0,0.62,0.18
-1,0.58,0.21
-...
+with st.expander("CSV format (copy/paste template)", expanded=False):
+    st.code(
+        "time,value\n"
+        "0,1.00\n"
+        "1,1.02\n"
+        "2,1.01\n"
+        "3,1.05\n"
+        "4,1.08\n"
+        "5,1.06\n"
+        "6,1.10\n"
+        "7,1.12\n"
+        "8,1.09\n"
+        "9,1.15\n"
+        "10,1.18\n"
+        "11,1.20\n"
+    )
+
+left, right = st.columns([1.05, 0.95])
+
+with left:
+    st.subheader("1) Load data")
+    upload = st.file_uploader("Upload CSV", type=["csv"])
+    pasted = st.text_area("…or paste CSV here", height=180, placeholder="time,value\n0,1.0\n1,1.02\n...")
+
+    use_demo = st.toggle("Use demo dataset (12 events)", value=False)
+
+with right:
+    st.subheader("2) Settings")
+    window = st.slider("Rolling window (events)", 3, 30, 8, 1)
+    slope_thr = st.slider("Slope threshold (robust z)", 0.1, 3.0, 0.6, 0.05)
+    var_thr = st.slider("Chaos gate: variance threshold (robust z)", 0.1, 5.0, 1.2, 0.05)
+
+    st.markdown("**Square packing**")
+    cols = st.slider("Squares per row", 6, 40, 16, 1)
+
+    st.markdown("**Cluster detection**")
+    cluster_min_len = st.slider("Min run length to count as cluster", 2, 30, 4, 1)
+    cluster_states = st.multiselect("Cluster states to flag", options=[-1, 0, 1], default=[-1, 1])
+
+
+# -----------------------------
+# Load & validate
+# -----------------------------
+df = None
+
+if use_demo:
+    t = np.arange(12)
+    y = np.array([1.00, 1.02, 1.01, 1.05, 1.08, 1.06, 1.10, 1.12, 1.09, 1.15, 1.18, 1.20])
+    df = pd.DataFrame({"time": t, "value": y})
+else:
+    raw = None
+    if upload is not None:
+        raw = upload.read().decode("utf-8", errors="ignore")
+    elif pasted.strip():
+        raw = pasted
+
+    if raw:
+        try:
+            df = pd.read_csv(StringIO(raw))
+        except Exception as e:
+            st.error(f"Could not parse CSV: {e}")
+            df = None
+
+if df is None:
+    st.info("Load data to begin (upload or paste), or toggle the demo dataset.")
+    st.stop()
+
+required = {"time", "value"}
+if not required.issubset(set(df.columns)):
+    st.error(f"CSV must include columns: {sorted(required)}. Found: {list(df.columns)}")
+    st.stop()
+
+df = df.copy()
+df = df.sort_values("time").reset_index(drop=True)
+
+# Ensure numeric
+df["time"] = pd.to_numeric(df["time"], errors="coerce")
+df["value"] = pd.to_numeric(df["value"], errors="coerce")
+df = df.dropna(subset=["time", "value"]).reset_index(drop=True)
+
+if len(df) < 12:
+    st.warning(f"Only {len(df)} rows loaded. You said you want ~12+ events; this will still run, but visuals are better with more.")
+
+# -----------------------------
+# Compute features
+# -----------------------------
+t = df["time"].to_numpy(dtype=float)
+y = df["value"].to_numpy(dtype=float)
+
+slope = rolling_slope(t, y, window)
+var = rolling_var(y, window)
+
+slope_z = robust_z(slope)
+var_z = robust_z(var)
+
+state = assign_state(slope_z=slope_z, var_z=var_z, slope_thr=slope_thr, var_thr=var_thr)
+
+df["slope"] = slope
+df["var"] = var
+df["slope_z"] = slope_z
+df["var_z"] = var_z
+df["state"] = state
+
+# -----------------------------
+# Metrics: persistence, alternation, clusters
+# -----------------------------
+runs = run_lengths(state)
+
+# Persistence: average run length (non-NaN)
+run_lens = [r[3] for r in runs]
+avg_persist = float(np.mean(run_lens)) if run_lens else 0.0
+max_persist = int(np.max(run_lens)) if run_lens else 0
+
+# Alternation: number of state changes per event
+changes = int(np.sum(state[1:] != state[:-1])) if len(state) > 1 else 0
+alt_rate = float(changes / max(len(state) - 1, 1))
+
+# Cluster detection
+clusters = []
+for (a, b, v, ln) in runs:
+    if (v in cluster_states) and (ln >= cluster_min_len):
+        clusters.append({"start_idx": a, "end_idx": b, "state": int(v), "length": int(ln)})
+
+clusters_df = pd.DataFrame(clusters)
+
+# -----------------------------
+# Visuals
+# -----------------------------
+grid = build_square_grid(state, cols=cols)
+
+topA, topB = st.columns([0.55, 0.45])
+
+with topA:
+    st.subheader("Square Projection")
+    fig = plot_square_grid(grid, title="State Grid  (-1 red | 0 grey | +1 green)")
+    st.pyplot(fig, clear_figure=True)
+
+with topB:
+    st.subheader("Key scores")
+    st.metric("Events", len(df))
+    st.metric("Avg persistence (run length)", f"{avg_persist:.2f}")
+    st.metric("Max persistence (run length)", f"{max_persist}")
+    st.metric("Alternation rate", f"{alt_rate:.3f}")
+    st.metric("State changes", f"{changes}")
+
+    st.markdown("---")
+    st.write("State counts:")
+    counts = pd.Series(state).value_counts().sort_index()
+    st.dataframe(counts.rename("count").to_frame(), use_container_width=True)
+
+mid1, mid2 = st.columns([0.6, 0.4])
+
+with mid1:
+    st.subheader("Processed table")
+    st.dataframe(df, use_container_width=True, height=300)
+
+with mid2:
+    st.subheader("Clusters (runs)")
+    if clusters_df.empty:
+        st.write("No clusters found with current settings.")
+    else:
+        st.dataframe(clusters_df, use_container_width=True, height=300)
+
+    # quick legend
+    st.markdown("**Interpretation (recommended):**")
+    st.write("- **+1** = escape/drive (positive slope, not chaotic)")
+    st.write("- **0** = coherent/hold (flat, or chaos-gated)")
+    st.write("- **-1** = collapse/lock (negative slope, not chaotic)")
+
+# Optional line plot
+st.subheader("Signal view")
+show_features = st.toggle("Show slope/variance panels", value=True)
+
+fig2, ax = plt.subplots(figsize=(10, 3))
+ax.plot(df["time"], df["value"])
+ax.set_xlabel("time")
+ax.set_ylabel("value")
+ax.set_title("Value vs time")
+plt.tight_layout()
+st.pyplot(fig2, clear_figure=True)
+
+if show_features:
+    fig3, ax3 = plt.subplots(figsize=(10, 3))
+    ax3.plot(df["time"], df["slope_z"], label="slope_z")
+    ax3.axhline(slope_thr, linestyle="--")
+    ax3.axhline(-slope_thr, linestyle="--")
+    ax3.set_title("Robust slope z-score (thresholded)")
+    ax3.set_xlabel("time")
+    ax3.set_ylabel("slope_z")
+    ax3.legend()
+    plt.tight_layout()
+    st.pyplot(fig3, clear_figure=True)
+
+    fig4, ax4 = plt.subplots(figsize=(10, 3))
+    ax4.plot(df["time"], np.abs(df["var_z"]), label="|var_z|")
+    ax4.axhline(var_thr, linestyle="--")
+    ax4.set_title("Chaos gate driver (robust |variance z|)")
+    ax4.set_xlabel("time")
+    ax4.set_ylabel("|var_z|")
+    ax4.legend()
+    plt.tight_layout()
+    st.pyplot(fig4, clear_figure=True)
+
+# -----------------------------
+# Download processed CSV
+# -----------------------------
+st.subheader("Download")
+csv_out = df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "Download processed CSV (with states, slope_z, var_z)",
+    data=csv_out,
+    file_name="square_projection_processed.csv",
+    mime="text/csv",
+)
+
+st.caption("Tip: if everything keeps turning 0, lower the variance gate threshold OR lower the window size.")
